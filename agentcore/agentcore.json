@@ -15,7 +15,10 @@
       "codeLocation": "app/CustomerSupport/",
       "runtimeVersion": "PYTHON_3_14",
       "networkMode": "PUBLIC",
-      "protocol": "HTTP"
+      "protocol": "HTTP",
+      "requestHeaderAllowlist": [
+          "X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id"
+      ]
     }
   ],
   "memories": [
