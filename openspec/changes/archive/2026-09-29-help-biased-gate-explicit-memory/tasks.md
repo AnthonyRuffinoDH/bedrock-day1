@@ -64,7 +64,7 @@
 
 - [x] 7.4 Run `agentcore validate` and `agentcore deploy -y -v` to deploy the prompt changes. Verify: deployment completes successfully.
 
-- [ ] 7.5 End-to-end reconciliation test via Slack: in one thread, store an issue (e.g., "the widget API is down"). In a second thread, mark it as resolved. In a third thread, ask about the widget API status. Confirm the agent surfaces the resolution rather than the original issue report.
+- [x] 7.5 End-to-end reconciliation test via Slack: in one thread, store an issue (e.g., "the widget API is down"). In a second thread, mark it as resolved. In a third thread, ask about the widget API status. Confirm the agent surfaces the resolution rather than the original issue report.
 
 ## 8. Integration verification
 
@@ -72,6 +72,6 @@
 
 - [x] 8.2 Run `agentcore deploy -y -v` to deploy the updated agent. Verify: deployment completes successfully. (Note: deploy takes ~3 minutes.)
 
-- [ ] 8.3 End-to-end test via Slack: send an untagged ambient message that is a plausible support question in a channel where the bot is present. Confirm the bot responds (help-biased gate). Send a clearly social message in a thread where the bot has not participated. Confirm the bot stays silent (no reaction, no reply). In a thread where the bot has replied, send a follow-up question and confirm the bot responds with awareness of the thread context.
+- [x] 8.3 End-to-end test via Slack: send an untagged ambient message that is a plausible support question in a channel where the bot is present. Confirm the bot responds (help-biased gate). Send a clearly social message in a thread where the bot has not participated. Confirm the bot stays silent (no reaction, no reply). In a thread where the bot has replied, send a follow-up question and confirm the bot responds with awareness of the thread context.
 
-- [ ] 8.4 End-to-end memory test via Slack: in a conversation, provide information the agent should find durably useful (e.g., "our team's preferred return policy is always full refund"). Confirm the agent stores it via channel memory. In a new thread in the same channel, ask a question where that stored knowledge would help. Confirm the agent recalls it and uses it in its response.
+- [x] 8.4 End-to-end memory test via Slack: in a conversation, provide information the agent should find durably useful (e.g., "our team's preferred return policy is always full refund"). Confirm the agent stores it via channel memory. In a new thread in the same channel, ask a question where that stored knowledge would help. Confirm the agent recalls it and uses it in its response.
