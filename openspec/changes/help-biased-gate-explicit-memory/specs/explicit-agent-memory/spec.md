@@ -62,6 +62,58 @@ Memory tools SHALL execute their operations through a secondary AgentCore agent 
 - **WHEN** the main agent invokes `channel_memory_recall`
 - **THEN** the tool internally constructs a secondary agent with a memory session manager scoped to the channel namespace, sends the query, and returns the retrieved context to the main agent
 
+### Requirement: Automatic memory pre-recall on first thread message
+
+On the first message of a new session (no cached agent for this session ID), the AgentCore entrypoint SHALL automatically perform a channel memory recall before the main agent processes the user's prompt. The recall uses a dedicated pre-recall agent whose purpose is to determine what previously stored channel knowledge, if any, is relevant to the incoming message. The pre-recall agent SHALL NOT attempt to answer the user's question — it SHALL only return relevant historical context or nothing.
+
+#### Scenario: First message with relevant channel history
+
+- **WHEN** a user sends the first message in a new thread and channel memory contains information relevant to that message
+- **THEN** the pre-recall agent returns the relevant context, which is prepended to the main agent's prompt as background knowledge
+
+#### Scenario: First message with no relevant channel history
+
+- **WHEN** a user sends the first message in a new thread and channel memory contains nothing relevant
+- **THEN** the pre-recall agent returns nothing and the main agent receives no injected memory context
+
+#### Scenario: Subsequent messages in same thread
+
+- **WHEN** a user sends a follow-up message in an existing thread (agent already cached for this session)
+- **THEN** no automatic pre-recall occurs — the main agent may still call `channel_memory_recall` explicitly if it chooses
+
+#### Scenario: Pre-recall failure
+
+- **WHEN** the pre-recall agent invocation fails (timeout, error, memory service unavailable)
+- **THEN** the main agent proceeds without injected memory context and the failure is not surfaced to the user
+
+### Requirement: Memory updates supersede prior entries
+
+When the agent stores information that updates, resolves, or contradicts a previously stored fact, the stored content SHALL include enough context from the original entry that a future semantic recall for the original topic returns the updated entry at equal or higher relevance. The agent SHALL frame updates as superseding records rather than standalone new facts.
+
+#### Scenario: Issue reported then resolved
+
+- **WHEN** the agent previously stored "ongoing issue: stale product catalog" and later stores a resolution
+- **THEN** the resolution entry includes the original topic context (e.g., "RESOLVED: The stale product catalog issue is now fixed") so that a future recall for "product catalog issue" returns the resolution
+
+#### Scenario: Preference changed
+
+- **WHEN** the agent previously stored a team preference and the user updates it
+- **THEN** the new entry references the prior preference and states the replacement (e.g., "UPDATED: Team return policy preference changed from store credit to full refund")
+
+### Requirement: Recall reconciliation of contradictory entries
+
+When a memory recall returns multiple entries about the same topic that contradict each other, the agent SHALL prefer the entry that reflects the most recent state and SHALL NOT present outdated information as current without noting the contradiction.
+
+#### Scenario: Recall returns both an issue report and its resolution
+
+- **WHEN** `channel_memory_recall` returns entries indicating both an open issue and a resolved status for the same topic
+- **THEN** the agent treats the resolution as authoritative and does not present the issue as still open
+
+#### Scenario: Recall returns only the older entry
+
+- **WHEN** `channel_memory_recall` returns only an older entry about a topic that may have been updated in a different thread
+- **THEN** the agent presents the recalled information but qualifies it with the date or context it was stored, rather than asserting it as definitely current
+
 ### Requirement: Memory is optional enrichment
 
 The main agent's system prompt SHALL instruct it to treat persistent memory as optional supporting context. Memory recall results SHALL not be assumed authoritative or complete. The agent SHALL not depend on memory for understanding the active Slack thread — that context comes from the thread messages supplied in the invocation payload.

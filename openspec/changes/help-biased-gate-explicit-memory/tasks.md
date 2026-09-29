@@ -44,12 +44,34 @@
 
 - [x] 5.1 Replace the `<memory_architecture_and_rules>` block in `SYSTEM_PROMPT` with new guidance that: explains memory is available via `channel_memory_store` and `channel_memory_recall` tools; instructs the agent to use thread context from the payload as primary conversational state; directs the agent to recall memory only when prior channel knowledge would materially help; directs the agent to store memory only for durably useful information; treats memory results as supporting context not authoritative. Verify: read the updated `SYSTEM_PROMPT` and confirm it contains no references to automatic memory injection, session IDs, or the old memory architecture rules.
 
-## 6. Integration verification
+## 6. Automatic memory pre-recall on first thread message
 
-- [x] 6.1 Run `agentcore validate` to confirm the configuration is still valid after all code changes. Verify: command exits 0 with no errors.
+- [ ] 6.1 Add `PRE_RECALL_PROMPT` constant in `main.py`. The prompt instructs the agent that it is a memory relevance filter: given a user's message and its memory context, return only previously stored channel facts relevant to answering that question — concise, factual, no commentary. If nothing is relevant, return exactly `NO_RELEVANT_HISTORY`. The agent SHALL NOT attempt to answer the user's question. Verify: read the constant and confirm it contains the relevance-filter instructions and the `NO_RELEVANT_HISTORY` sentinel.
 
-- [x] 6.2 Run `agentcore deploy -y -v` to deploy the updated agent. Verify: deployment completes successfully. (Note: deploy takes ~3 minutes.)
+- [ ] 6.2 Add a `pre_recall_channel_memory(prompt, channel_id, session_id)` function in `main.py`. It constructs a short-lived `Agent` with `session_manager=get_channel_memory_session_manager(channel_id, session_id)`, `tools=TOOL_PROFILES["memory"]()`, and `system_prompt=PRE_RECALL_PROMPT`. It sends the user's prompt and returns the agent's response, or `None` if the result is `NO_RELEVANT_HISTORY` or on any exception. Verify: call the function with a prompt that has matching channel memory and confirm relevant facts are returned; call with an unrelated prompt and confirm `None` is returned.
 
-- [ ] 6.3 End-to-end test via Slack: send an untagged ambient message that is a plausible support question in a channel where the bot is present. Confirm the bot responds (help-biased gate). Send a clearly social message in a thread where the bot has not participated. Confirm the bot stays silent (no reaction, no reply). In a thread where the bot has replied, send a follow-up question and confirm the bot responds with awareness of the thread context.
+- [ ] 6.3 In the `invoke` entrypoint in `main.py`, after setting `_request_context` and before `get_or_create_agent`, check whether this is a new session (`session_id not in _agents`). If so, call `pre_recall_channel_memory(prompt_input, channel_id, session_id)`. If the result is not `None`, prepend it to the prompt as a `[Channel history]` context block alongside the existing speaker/thread context. Verify: invoke a new session via `generate_curl.py` with a prompt that matches stored channel memory and confirm the `[Channel history]` block appears in the log; invoke with no matching memory and confirm no block is added.
 
-- [ ] 6.4 End-to-end memory test via Slack: in a conversation, provide information the agent should find durably useful (e.g., "our team's preferred return policy is always full refund"). Confirm the agent stores it via channel memory. In a new thread in the same channel, ask a question where that stored knowledge would help. Confirm the agent recalls it and uses it in its response.
+- [ ] 6.4 Confirm that subsequent messages in the same thread (agent cached in `_agents`) do NOT trigger the pre-recall. Verify: send two consecutive messages in the same session via `generate_curl.py` and confirm pre-recall log output appears only for the first.
+
+## 7. Memory supersession and recall reconciliation
+
+- [ ] 7.1 Update `MEMORY_AGENT_PROMPT` in `main.py` to instruct the secondary memory agent to echo stored content in a form that references the topic being updated — e.g., when storing a resolution, include the original issue description so embeddings overlap. Verify: inspect the updated prompt string and confirm it contains guidance about referencing prior context in stored entries.
+
+- [ ] 7.2 Update the `channel_memory_store` tool's docstring and the main agent's `SYSTEM_PROMPT` `<memory_tools>` section to instruct the agent that when storing updates or resolutions, it SHALL include the original topic and prior status in the content (e.g., "RESOLVED: [original issue] is now [new status]"). Verify: read the updated `SYSTEM_PROMPT` and confirm the store guidance includes supersession instructions.
+
+- [ ] 7.3 Add a `<memory_reconciliation>` block to `SYSTEM_PROMPT` with rules: (a) when recall returns multiple entries about the same topic with contradictory statuses, prefer the entry indicating resolution/completion/update; (b) when a single entry is returned about an issue or status, qualify it temporally (e.g., "as of the last update I have...") rather than asserting it as absolute; (c) never assert an issue is ongoing without checking whether a resolution also exists in the recalled results. Verify: read the updated `SYSTEM_PROMPT` and confirm all three reconciliation rules are present.
+
+- [ ] 7.4 Run `agentcore validate` and `agentcore deploy -y -v` to deploy the prompt changes. Verify: deployment completes successfully.
+
+- [ ] 7.5 End-to-end reconciliation test via Slack: in one thread, store an issue (e.g., "the widget API is down"). In a second thread, mark it as resolved. In a third thread, ask about the widget API status. Confirm the agent surfaces the resolution rather than the original issue report.
+
+## 8. Integration verification
+
+- [x] 8.1 Run `agentcore validate` to confirm the configuration is still valid after all code changes. Verify: command exits 0 with no errors.
+
+- [x] 8.2 Run `agentcore deploy -y -v` to deploy the updated agent. Verify: deployment completes successfully. (Note: deploy takes ~3 minutes.)
+
+- [ ] 8.3 End-to-end test via Slack: send an untagged ambient message that is a plausible support question in a channel where the bot is present. Confirm the bot responds (help-biased gate). Send a clearly social message in a thread where the bot has not participated. Confirm the bot stays silent (no reaction, no reply). In a thread where the bot has replied, send a follow-up question and confirm the bot responds with awareness of the thread context.
+
+- [ ] 8.4 End-to-end memory test via Slack: in a conversation, provide information the agent should find durably useful (e.g., "our team's preferred return policy is always full refund"). Confirm the agent stores it via channel memory. In a new thread in the same channel, ask a question where that stored knowledge would help. Confirm the agent recalls it and uses it in its response.

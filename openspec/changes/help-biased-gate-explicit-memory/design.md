@@ -170,6 +170,68 @@ Using callables (lambdas) so MCP clients and tools resolve at construction time,
 
 **Why:** Direct spec requirement. The current thumbs-up creates noise and signals the bot's presence on messages it chose not to answer.
 
+### 9. Superseding memory entries on store
+
+**Decision:** The `channel_memory_store` tool's system prompt instructs the secondary memory agent to frame updates as superseding records. When the main agent stores a resolution or change to a previously stored fact, the content sent to the memory agent includes explicit context from the original entry — topic, prior status, and the new status — so that the updated entry is semantically similar to the original and ranks at least as high on future recalls.
+
+**Why:** AgentCore Memory's SEMANTIC strategy indexes facts by embedding similarity. If a resolution is stored as a standalone fact ("catalog issue is fixed"), it may score lower than the original report ("ongoing issue: stale product catalog") when a user asks "any product catalog issues?" because the original is a closer semantic match to the question. Including the original topic in the update ("RESOLVED: The stale product catalog issue originally reported as ongoing is now fixed") makes the embeddings overlap, giving the resolution a competitive relevance score.
+
+**Implementation:** Two changes:
+1. The `MEMORY_AGENT_PROMPT` instructs the memory agent to echo back the stored content in a form that references the topic being updated.
+2. The main agent's `SYSTEM_PROMPT` guidance for `channel_memory_store` instructs it to include prior context when storing updates (e.g., "RESOLVED: [original issue description] is now [new status]").
+
+**Alternative considered:** Deleting old entries before writing new ones. Rejected — the AgentCore Memory SDK does not expose a delete-by-content API through the Strands session manager, and even if it did, identifying which prior entry to delete requires a recall-then-delete sequence that adds latency and complexity.
+
+### 10. Recall reconciliation via system prompt
+
+**Decision:** Add guidance to the main agent's `SYSTEM_PROMPT` that when `channel_memory_recall` returns multiple entries about the same topic with contradictory statuses, the agent SHALL prefer the entry that reflects a resolution or more recent state. When only an older entry is returned with no contradiction, the agent should qualify it with temporal context rather than asserting it as definitively current.
+
+**Why:** Even with superseding stores, there is no guarantee that the recall `top_k` window will always surface the newest entry first — embedding similarity and relevance scoring are not time-ordered. The agent needs explicit instruction to reconcile rather than naively surfacing the first match.
+
+**Implementation:** Add a `<memory_reconciliation>` block to `SYSTEM_PROMPT` with rules:
+- If multiple entries about the same topic are returned, prefer the one indicating resolution/completion/update.
+- If a single entry is returned about an issue or status, qualify it (e.g., "as of the last update I have...") rather than stating it as absolute fact.
+- Never assert that an issue is ongoing without checking whether a resolution exists.
+
+### 11. Automatic memory pre-recall on first thread message
+
+**Decision:** In the `invoke` entrypoint in `main.py`, when the session is new (session_id not in `_agents`), perform a channel memory recall before the main agent loop. This uses a dedicated pre-recall agent — a short-lived `Agent` with a memory session manager but no tools — whose system prompt instructs it to act as a relevance filter: given the user's message, return only channel history that would be useful to another agent answering that question, or return nothing.
+
+**Why:** The first message in a thread has no prior conversational context. Without pre-recall, the agent starts cold and can only access channel memory if it explicitly calls `channel_memory_recall` — which it may not think to do. Automatic pre-recall ensures the agent benefits from stored channel knowledge on every new conversation without relying on the LLM's judgment to trigger the recall.
+
+**Trigger:** New session detection via `session_id not in _agents`. This is checked before `get_or_create_agent` constructs the agent, so it fires exactly once per thread — the first time.
+
+**Pre-recall agent construction:**
+
+```python
+PRE_RECALL_PROMPT = """You are a memory relevance filter. You will receive a user's message and 
+have access to stored channel history via your memory context.
+
+Your job is NOT to answer the user's question. Instead, determine what in the channel's stored 
+history might be relevant to an agent who will answer this question.
+
+If relevant history exists, return ONLY the relevant facts — concise, factual, no commentary.
+If nothing in the channel history is relevant, return exactly: NO_RELEVANT_HISTORY"""
+```
+
+```
+pre_recall(user_prompt, channel_id, session_id)
+  → build AgentCoreMemorySessionManager(actor_id=channel_id, session_id=session_id)
+  → Agent(model=load_model(), session_manager=sm, tools=[], system_prompt=PRE_RECALL_PROMPT)
+  → agent(user_prompt)
+  → if result != "NO_RELEVANT_HISTORY": prepend to main agent prompt
+```
+
+**Integration with main agent prompt:** The pre-recall result is injected as a `[Channel history]` block in the context prepended to the prompt, alongside speaker and thread context. The main agent sees it as background knowledge, not as a tool call result.
+
+**Only on first message:** Subsequent messages in the same thread hit the cached agent in `_agents` and skip the pre-recall. The main agent can still call `channel_memory_recall` explicitly on any turn if it decides additional memory lookup would help.
+
+**Failure handling:** If the pre-recall agent throws an exception or times out, log the error and proceed without injected memory. The pre-recall is a best-effort enrichment, not a gate.
+
+**Alternative considered:** Running the pre-recall in the harness (bot.py) as a separate HTTP call. Rejected — this adds a second round-trip and moves memory infrastructure knowledge into the harness. Keeping it in `main.py` reuses the existing `_request_context`, `get_channel_memory_session_manager`, and `load_model()` path with zero new harness code.
+
+**Alternative considered:** Always pre-recalling on every message, not just the first. Rejected — subsequent messages already have thread context and the cached agent's conversation history. Pre-recalling on every message adds latency without proportional benefit, and the agent can still recall explicitly when needed.
+
 ## Risks / Trade-offs
 
 **[Increased Slack API calls] → Mitigation: caching and limiting**
@@ -186,3 +248,6 @@ The current `_agents` dict caches agents by `session_id`. If memory tools captur
 
 **[Gate evaluator sees more context → higher token usage] → Mitigation: bounded context**
 Thread context is capped at 10 recent messages. The gate evaluator is a lightweight classifier — the additional context improves accuracy and is worth the marginal token cost.
+
+**[Pre-recall adds latency on first message] → Mitigation: first-message-only, best-effort**
+The pre-recall agent adds ~1-3s to the first message in every new thread. This is acceptable because: (1) only the first message pays this cost — subsequent messages skip it; (2) the first message already has the highest perceived latency (no cached agent, no thread context); (3) the pre-recall is best-effort — failure doesn't block the response.
