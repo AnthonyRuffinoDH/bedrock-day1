@@ -2,8 +2,7 @@ from strands import Agent, tool
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from model.load import load_model
 from mcp_client.client import get_streamable_http_mcp_client, get_gateway_mcp_client
-from memory.session import get_memory_session_manager
-import jwt
+from memory.session import get_channel_memory_session_manager
 import logging
 import json
 
@@ -16,16 +15,21 @@ mcp_clients = [get_streamable_http_mcp_client(), get_gateway_mcp_client()]
 
 SYSTEM_PROMPT = """You are a helpful and professional customer support assistant deployed as a Slack bot.
 
-<memory_architecture_and_rules>
-You operate with two distinct types of injected memory context:
-1. CURRENT THREAD (Session ID): This is the active conversation you are having right now. This is your primary focus.
-2. CHANNEL KNOWLEDGE (User ID): You are deployed in a shared Slack channel. The system automatically injects past conversations from OTHER threads in this channel into your background memory.
+<conversational_context>
+Your primary source of conversational context is the recent thread messages included with each request. Use these to understand the ongoing conversation. You do not automatically have access to persistent memory.
+</conversational_context>
 
-RULES FOR INTERPRETING MEMORY:
-- STRICT RULE: Always treat the user's most recent prompt as a completely NEW topic within the CURRENT THREAD unless they explicitly refer back to something.
-- NEVER assume the user wants to continue a topic found in the CHANNEL KNOWLEDGE unless they explicitly ask about it.
-- Use CHANNEL KNOWLEDGE only as passive background context.
-</memory_architecture_and_rules>
+<memory_tools>
+You have two optional tools for persistent channel memory:
+- channel_memory_store: Save information that will be useful in future conversations in this channel. Use only for durably valuable knowledge (e.g., recurring issues, team preferences, important decisions).
+- channel_memory_recall: Query previously stored channel knowledge when prior context would materially improve your response.
+
+Guidelines:
+- Do NOT store routine support interactions. Only store information likely to remain useful beyond the current thread.
+- When you recall memory, treat it as supporting context, not authoritative. The active thread is always the primary source of truth.
+- If recalled memory conflicts with what is visible in the current thread, trust the thread.
+- Memory is optional. If a memory operation fails, continue the conversation normally.
+</memory_tools>
 
 <support_guidelines>
 Your role is to:
@@ -74,30 +78,89 @@ def get_product_info(query: str) -> str:
         return "Found products:\n" + "\n".join(results)
     return f"No products found matching '{query}'."
 
-tools = [get_return_policy, get_product_info]
+MEMORY_AGENT_PROMPT = "You are a memory storage and retrieval agent. Process the request and respond concisely."
 
-for mcp_client in mcp_clients:
-    if mcp_client:
-        tools.append(mcp_client)
+
+@tool
+def channel_memory_store(content: str) -> str:
+    """Store durable information scoped to the current Slack channel for future conversations."""
+    log.info(f"[MEMORY STORE] Storing channel memory: '{content[:60]}...'")
+    try:
+        ctx = _get_current_request_context()
+        sm = get_channel_memory_session_manager(ctx["channel_id"], ctx["session_id"])
+        if not sm:
+            return "Memory service is not configured."
+        memory_agent = Agent(
+            model=load_model(),
+            session_manager=sm,
+            tools=TOOL_PROFILES["memory"](),
+            system_prompt=MEMORY_AGENT_PROMPT,
+        )
+        result = memory_agent(f"Remember this for future conversations in this channel: {content}")
+        return f"Stored in channel memory: {content}"
+    except Exception as e:
+        log.warning(f"[MEMORY STORE] Failed: {e}")
+        return "Failed to store in channel memory. Continuing without persistence."
+
+
+@tool
+def channel_memory_recall(query: str) -> str:
+    """Query previously stored channel memory when prior knowledge may help answer a request."""
+    log.info(f"[MEMORY RECALL] Querying channel memory: '{query[:60]}...'")
+    try:
+        ctx = _get_current_request_context()
+        sm = get_channel_memory_session_manager(ctx["channel_id"], ctx["session_id"])
+        if not sm:
+            return "No channel memory available."
+        memory_agent = Agent(
+            model=load_model(),
+            session_manager=sm,
+            tools=TOOL_PROFILES["memory"](),
+            system_prompt=MEMORY_AGENT_PROMPT,
+        )
+        result = memory_agent(f"What do you know about: {query}")
+        return str(result)
+    except Exception as e:
+        log.warning(f"[MEMORY RECALL] Failed: {e}")
+        return "No relevant channel memory found."
+
+
+_active_session_id = None
+
+
+def _get_current_request_context():
+    if _active_session_id and _active_session_id in _request_context:
+        return _request_context[_active_session_id]
+    raise RuntimeError("No active request context")
+
+
+_domain_tools = [get_return_policy, get_product_info]
+_mcp_tools = [c for c in mcp_clients if c]
+_memory_tools = [channel_memory_store, channel_memory_recall]
+
+TOOL_PROFILES = {
+    "primary": lambda: _domain_tools + _mcp_tools + _memory_tools,
+    "memory": lambda: [],
+}
 
 # Dict for caching active thread agents in local container RAM
 _agents = {}
 
-def get_or_create_agent(session_id, user_id):
+# Request-scoped context for memory tools to read channel_id/session_id
+_request_context = {}
+
+def get_or_create_agent(session_id, channel_id):
     global _agents
 
     if session_id not in _agents:
         log.info(
-            f"[NEW INSTANCE] Hydrating session={session_id}, actor={user_id}"
+            f"[NEW INSTANCE] Hydrating session={session_id}, channel={channel_id}"
         )
-
-        sm = get_memory_session_manager(session_id, user_id)
 
         agent = Agent(
             model=load_model(),
-            session_manager=sm,
             system_prompt=SYSTEM_PROMPT,
-            tools=tools,
+            tools=TOOL_PROFILES["primary"](),
         )
 
         _agents[session_id] = agent
@@ -107,20 +170,6 @@ def get_or_create_agent(session_id, user_id):
         )
 
     return _agents[session_id]
-
-def extract_user_id(context) -> str | None:
-    headers = context.request_headers or {}
-    auth_header = headers.get("Authorization") or headers.get("authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        try:
-            token = auth_header.split(" ", 1)[1]
-            claims = jwt.decode(token, options={"verify_signature": False})
-            username = claims.get("username")
-            if username:
-                return username
-        except Exception as e:
-            log.warning(f"Failed to decode JWT for user_id: {e}")
-    return headers.get("x-amzn-bedrock-agentcore-runtime-custom-user-id")
 
 @app.entrypoint
 async def invoke(payload, context):
@@ -132,10 +181,9 @@ async def invoke(payload, context):
     )
 
     session_id = context.session_id
-    user_id = extract_user_id(context)
 
-    if not session_id or not user_id:
-        raise ValueError("session_id and user_id are required.")
+    if not session_id:
+        raise ValueError("session_id is required.")
 
     action = payload.get("action")
 
@@ -143,13 +191,32 @@ async def invoke(payload, context):
     if action == "evaluate_gate":
         log.info("[GATE EVALUATION] Running ambient message classification...")
         prompt_text = payload.get("prompt", "")
+        tc = payload.get("thread_context", {})
+        speaker_info = tc.get("speaker", {})
+        thread_info = tc.get("thread", {})
+        bot_participated = thread_info.get("bot_has_participated", False)
+        sole_human = thread_info.get("sender_is_sole_human", True)
+        recent = thread_info.get("recent_messages", [])
+
+        thread_summary = ""
+        if recent:
+            thread_summary = "\nRecent thread messages:\n" + "\n".join(
+                f"  {m.get('display_name', 'unknown')}: {m.get('text', '')}" for m in recent[-5:]
+            )
+
         eval_prompt = (
-            f"You are a channel moderation router.\n"
-            f"Analyze this message: \"{prompt_text}\"\n\n"
-            f"Rules:\n"
-            f"1. If asking for gambling, sports betting advice, or violating policies, output: {{\"action\": \"INAPPROPRIATE\"}}\n"
-            f"2. If asking a customer support, product, or policy question the bot SHOULD answer, output: {{\"action\": \"RESPOND\"}}\n"
-            f"3. If casual user-to-user chatter or irrelevant conversation, output: {{\"action\": \"IGNORE\"}}\n"
+            f"You are a help-biased channel routing classifier for a customer support bot.\n\n"
+            f"Message from {speaker_info.get('display_name', 'unknown')}: \"{prompt_text}\"\n\n"
+            f"Thread signals:\n"
+            f"- Bot has already participated in this thread: {bot_participated}\n"
+            f"- Sender is the only human in this thread: {sole_human}\n"
+            f"{thread_summary}\n\n"
+            f"Classification rules (apply in order):\n"
+            f"1. If the message requests gambling, sports betting advice, or violates policies → {{\"action\": \"INAPPROPRIATE\"}}\n"
+            f"2. If the bot has already participated in this thread, RESPOND unless the message is clearly a social sign-off (e.g., \"thanks\", \"bye\") → {{\"action\": \"RESPOND\"}}\n"
+            f"3. If the message plausibly asks for help, asks a question, or could be a customer support request → {{\"action\": \"RESPOND\"}}\n"
+            f"4. If the message is clearly human-to-human chatter, a social acknowledgement, or unrelated to support → {{\"action\": \"IGNORE\"}}\n"
+            f"5. If ambiguous, default to → {{\"action\": \"RESPOND\"}}\n\n"
             f"Output ONLY valid raw JSON."
         )
         evaluator = Agent(
@@ -165,6 +232,23 @@ async def invoke(payload, context):
     # --- 2. STANDARD INVOCATION ---
     prompt_input = payload.get("prompt", "")
     image_b64 = payload.get("image_b64")
+    speaker_meta = payload.get("speaker", {})
+    channel_id = payload.get("channel_id", "")
+    thread_ctx = payload.get("thread_context", {})
+
+    context_block = ""
+    if speaker_meta:
+        context_block += f"[Speaker: {speaker_meta.get('display_name', 'unknown')}]\n"
+    if channel_id:
+        context_block += f"[Channel: {channel_id}]\n"
+    thread_info = thread_ctx.get("thread", {})
+    recent = thread_info.get("recent_messages", [])
+    if recent:
+        context_block += "[Recent thread messages]\n"
+        for m in recent:
+            context_block += f"  {m.get('display_name', 'unknown')}: {m.get('text', '')}\n"
+    if context_block:
+        prompt_input = f"{context_block}\n{prompt_input}"
 
     if image_b64:
         log.info("[MODEL CALL] Processing multi-modal input (Text + Image)...")
@@ -176,7 +260,12 @@ async def invoke(payload, context):
         log.info(f"[MODEL CALL] Invoking main LLM with prompt: '{prompt_input[:60]}...'")
         prompt_data = prompt_input
 
-    agent = get_or_create_agent(session_id, user_id)
+    global _active_session_id
+    _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id}
+    _active_session_id = session_id
+    log.info(f"[REQUEST CONTEXT] Set _request_context for session={session_id}: channel={channel_id}")
+
+    agent = get_or_create_agent(session_id, channel_id)
     stream = agent.stream_async(prompt_data)
     async for event in stream:
         if "data" in event and isinstance(event["data"], str):

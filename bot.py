@@ -32,10 +32,13 @@ except Exception as e:
     BOT_ID = "UNKNOWN"
 
 # --- CONFIGURABLE IN-MEMORY STATE ---
+THREAD_CONTEXT_LIMIT = int(os.getenv("THREAD_CONTEXT_LIMIT", "10"))
 THROTTLE_WINDOW_SEC = int(os.getenv("THROTTLE_WINDOW_SEC", "5"))
 MAX_WARNINGS = int(os.getenv("MAX_WARNINGS", "3"))
 WARNING_WINDOW_MIN = int(os.getenv("WARNING_WINDOW_MIN", "10"))
 BAN_DURATION_MIN = int(os.getenv("BAN_DURATION_MIN", "60"))
+
+_user_info_cache = {}                 # user_id -> {"user_id": ..., "display_name": ..., "real_name": ...}
 
 # State Stores
 user_last_msg_time = {}               # user_id -> float timestamp
@@ -43,6 +46,73 @@ user_warnings = defaultdict(list)     # user_id -> list of float timestamps
 user_bans = {}                        # user_id -> ban_expiry_timestamp
 silenced_threads = set()              # set of thread_ts strings
 thread_locks = defaultdict(threading.Lock)  # thread_ts -> Lock (enforces sequential thread execution)
+
+def get_user_info(user_id):
+    if user_id in _user_info_cache:
+        return _user_info_cache[user_id]
+    try:
+        result = app.client.users_info(user=user_id)
+        user = result["user"]
+        profile = user.get("profile", {})
+        info = {
+            "user_id": user_id,
+            "display_name": profile.get("display_name") or user.get("name", user_id),
+            "real_name": profile.get("real_name", ""),
+        }
+    except Exception as e:
+        logger.warning(f"Failed to resolve user info for {user_id}: {e}")
+        info = {"user_id": user_id, "display_name": user_id, "real_name": ""}
+    _user_info_cache[user_id] = info
+    return info
+
+
+def get_thread_context(channel_id, thread_ts, current_ts):
+    if thread_ts == current_ts:
+        return {
+            "bot_has_participated": False,
+            "sender_is_sole_human": True,
+            "participant_count": 1,
+            "recent_messages": [],
+        }
+    try:
+        result = app.client.conversations_replies(
+            channel=channel_id, ts=thread_ts, limit=THREAD_CONTEXT_LIMIT
+        )
+        messages = result.get("messages", [])
+    except Exception as e:
+        logger.warning(f"Failed to fetch thread context: {e}")
+        return {
+            "bot_has_participated": False,
+            "sender_is_sole_human": True,
+            "participant_count": 1,
+            "recent_messages": [],
+        }
+
+    bot_has_participated = any(
+        m.get("bot_id") or m.get("user") == BOT_ID for m in messages
+    )
+    human_users = {
+        m.get("user") for m in messages
+        if m.get("user") and m.get("user") != BOT_ID and not m.get("bot_id")
+    }
+    recent_messages = []
+    for m in messages:
+        uid = m.get("user", "")
+        user_info = get_user_info(uid) if uid else {"user_id": "", "display_name": "bot", "real_name": ""}
+        recent_messages.append({
+            "user": uid,
+            "display_name": user_info["display_name"],
+            "text": m.get("text", ""),
+            "ts": m.get("ts", ""),
+        })
+
+    return {
+        "bot_has_participated": bot_has_participated,
+        "sender_is_sole_human": len(human_users) <= 1,
+        "participant_count": len(human_users) + (1 if bot_has_participated else 0),
+        "recent_messages": recent_messages,
+    }
+
 
 def get_cognito_token():
     client_id = os.getenv('COGNITO_CLIENT_ID')
@@ -66,7 +136,7 @@ def make_session_id(channel_id, thread_ts):
     digest = hashlib.sha256(raw.encode()).hexdigest()
     return f"slack_{digest}"
 
-def invoke_agentcore(payload, channel_id, thread_ts):
+def invoke_agentcore(payload, channel_id, thread_ts, include_user_id=False):
     token = get_cognito_token()
     url = os.getenv("AGENT_URL")
 
@@ -75,12 +145,11 @@ def invoke_agentcore(payload, channel_id, thread_ts):
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-
-        # THIS controls AgentCore runtime session routing
         "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": session_id,
-
-        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id": channel_id,
     }
+
+    if include_user_id:
+        headers["X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id"] = channel_id
 
     logger.info(
         f"[HTTP OUTBOUND] Calling AgentCore API. "
@@ -165,6 +234,11 @@ def handle_message(body, logger, say):
 
     logger.info(f"[INGRESS MESSAGE] Channel: {channel_id} | User: {user_id} | Thread: {thread_ts} | Text: '{text}'")
 
+    # --- BUILD CONVERSATION CONTEXT ---
+    speaker = get_user_info(user_id)
+    thread_context = get_thread_context(channel_id, thread_ts, ts)
+    logger.info(f"[CONTEXT] Speaker: {speaker['display_name']} | Bot participated: {thread_context['bot_has_participated']} | Sole human: {thread_context['sender_is_sole_human']}")
+
     # --- 2. THREAD SILENCING COMMAND CHECK ---
     if f"<@{BOT_ID}> silence" in text.lower() or "/silence" in text.lower():
         silenced_threads.add(thread_ts)
@@ -208,7 +282,14 @@ def handle_message(body, logger, say):
             logger.info("[GATE] AMBIENT message detected. Evaluating intent via AgentCore...")
             react(channel_id, ts, "thinking_face")
             
-            gate_eval = invoke_agentcore({"action": "evaluate_gate", "prompt": text}, channel_id, thread_ts)
+            gate_eval = invoke_agentcore({
+                "action": "evaluate_gate",
+                "prompt": text,
+                "thread_context": {
+                    "speaker": speaker,
+                    "thread": thread_context,
+                },
+            }, channel_id, thread_ts, include_user_id=True)
             logger.info(f"[GATE RESULT] AgentCore raw output: '{gate_eval}'")
             
             try:
@@ -218,9 +299,8 @@ def handle_message(body, logger, say):
                 action = "IGNORE"
 
             if action == "IGNORE":
-                logger.info("[GATE DECISION] Result: IGNORE. Swapping :thinking_face: -> :thumbsup:")
+                logger.info("[GATE DECISION] Result: IGNORE. Removing :thinking_face: silently.")
                 unreact(channel_id, ts, "thinking_face")
-                react(channel_id, ts, "+1")
                 return
 
             elif action == "INAPPROPRIATE":
@@ -256,7 +336,15 @@ def handle_message(body, logger, say):
         # --- 7. ANSWER GENERATION PHASE ---
         logger.info(f"[MODEL CALL] Executing main AgentCore response stream for thread {thread_ts}...")
         
-        payload = {"prompt": text}
+        payload = {
+            "prompt": text,
+            "speaker": speaker,
+            "channel_id": channel_id,
+            "thread_context": {
+                "speaker": speaker,
+                "thread": thread_context,
+            },
+        }
         if image_b64:
             payload["image_b64"] = image_b64
 

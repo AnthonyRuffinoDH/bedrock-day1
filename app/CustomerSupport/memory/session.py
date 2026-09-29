@@ -6,6 +6,26 @@ from bedrock_agentcore.memory.integrations.strands.session_manager import AgentC
 MEMORY_ID = os.getenv("MEMORY_SHAREDMEMORY_ID")
 REGION = os.getenv("AWS_REGION")
 
+def get_channel_memory_session_manager(channel_id: str, session_id: str) -> Optional[AgentCoreMemorySessionManager]:
+    if not MEMORY_ID:
+        return None
+
+    retrieval_config = {
+        f"/users/{channel_id}/facts": RetrievalConfig(top_k=3, relevance_score=0.3),
+        f"/summaries/{channel_id}/{session_id}": RetrievalConfig(top_k=3, relevance_score=0.3)
+    }
+
+    return AgentCoreMemorySessionManager(
+        AgentCoreMemoryConfig(
+            memory_id=MEMORY_ID,
+            session_id=session_id,
+            actor_id=channel_id,
+            retrieval_config=retrieval_config,
+        ),
+        REGION
+    )
+
+
 def get_memory_session_manager(session_id: str, actor_id: str) -> Optional[AgentCoreMemorySessionManager]:
     if not MEMORY_ID:
         return None
