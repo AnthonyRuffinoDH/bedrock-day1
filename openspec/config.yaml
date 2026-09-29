@@ -1,32 +1,35 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Tech stack: Python 3.14, Strands Agent framework, Amazon Bedrock AgentCore (Runtime, Memory, Gateway)
+  Slack integration: slack_bolt (Socket Mode), requests for HTTP calls to AgentCore
+  Auth: Cognito M2M OAuth (client_credentials grant) → CUSTOM_JWT authorizer on AgentCore Runtime
+  Infrastructure: agentcore.json (declarative), deployed via agentcore CLI / CDK
+  Key constraint: No direct Bedrock API access — all model calls route through AgentCore Runtime
+  See CLAUDE.md for full architecture, file map, and current identity/session mapping
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Reference specific files and functions being changed
+    - Distinguish AgentCore-side changes (main.py, memory/, agentcore.json) from harness-side changes (bot.py)
+    - Call out deploy steps explicitly when infrastructure changes are needed
+  spec:
+    - Each spec should map to a single deployable unit of work
+    - Specs that touch agentcore.json must include a validate + deploy step
+    - Specs that change the AgentCore entrypoint payload contract must update both bot.py and main.py
+    - Memory is channel-scoped only — channel ID is the sole memory namespace key, never user ID
+  tasks:
+    - Break tasks so each is independently testable
+    - Prefer testing via generate_curl.py or agentcore invoke before full Slack bot testing
+    - Flag when a task requires agentcore deploy (it takes ~3 minutes)
 
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+operations:
+  apply:
+    guidance:
+      - Run agentcore validate before deploying
+      - Test AgentCore changes via agentcore invoke or generate_curl.py before testing through bot.py
+      - When changing the invocation payload contract, update bot.py and main.py in the same apply
+  archive:
+    guidance:
+      - Note which AgentCore resources were modified and whether a deploy was required
+      - Record any behavioral observations from testing (gate accuracy, memory behavior, etc.)
