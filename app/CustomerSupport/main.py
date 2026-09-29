@@ -5,6 +5,7 @@ from mcp_client.client import get_streamable_http_mcp_client, get_gateway_mcp_cl
 from memory.session import get_channel_memory_session_manager
 import logging
 import json
+from datetime import datetime, timezone
 
 app = BedrockAgentCoreApp()
 log = app.logger
@@ -26,10 +27,19 @@ You have two optional tools for persistent channel memory:
 
 Guidelines:
 - Do NOT store routine support interactions. Only store information likely to remain useful beyond the current thread.
+- When storing updates or resolutions to previously stored facts, always include the original topic and prior status in the content so future searches find the update. For example: "RESOLVED: The stale product catalog issue originally reported as ongoing is now fixed" or "UPDATED: Team return policy preference changed from store credit to full refund."
 - When you recall memory, treat it as supporting context, not authoritative. The active thread is always the primary source of truth.
 - If recalled memory conflicts with what is visible in the current thread, trust the thread.
 - Memory is optional. If a memory operation fails, continue the conversation normally.
 </memory_tools>
+
+<memory_reconciliation>
+IMPORTANT — you MUST follow these rules when using recalled memory:
+- If multiple entries about the same topic have contradictory statuses, treat the entry indicating resolution/completion/update as authoritative. Do NOT present an issue as ongoing when a resolution exists.
+- You MUST NOT present recalled information as definitively current. Always qualify with temporal language: "As of the last update I have...", "The most recent record shows...", or "Based on what was previously stored...". Memory entries may be outdated.
+- Never state "there IS an active issue" based solely on a recalled entry. Instead say "the last update I have indicates..." or similar.
+- If only one entry is returned about an issue, explicitly note that you cannot confirm whether it is still current.
+</memory_reconciliation>
 
 <support_guidelines>
 Your role is to:
@@ -78,12 +88,28 @@ def get_product_info(query: str) -> str:
         return "Found products:\n" + "\n".join(results)
     return f"No products found matching '{query}'."
 
-MEMORY_AGENT_PROMPT = "You are a memory storage and retrieval agent. Process the request and respond concisely."
+MEMORY_AGENT_PROMPT = """You are a memory storage and retrieval agent. Process the request and respond concisely.
+
+When storing information that updates, resolves, or changes a previously known fact, always reference \
+the original topic in your stored content so that future searches for the original topic will find \
+the update. For example, store "RESOLVED: The stale product catalog issue is now fixed" rather than \
+just "catalog issue fixed"."""
+
+PRE_RECALL_PROMPT = """You are a memory relevance filter. You will receive a user's message and \
+have access to stored channel history via your memory context.
+
+Your job is NOT to answer the user's question. Instead, determine what in the channel's stored \
+history might be relevant to an agent who will answer this question.
+
+If relevant history exists, return ONLY the relevant facts — concise, factual, no commentary.
+If nothing in the channel history is relevant, return exactly: NO_RELEVANT_HISTORY"""
+
+NO_RELEVANT_HISTORY = "NO_RELEVANT_HISTORY"
 
 
 @tool
 def channel_memory_store(content: str) -> str:
-    """Store durable information scoped to the current Slack channel for future conversations."""
+    """Store durable information scoped to the current Slack channel for future conversations. When storing updates or resolutions, include the original topic and prior status so the update supersedes older entries in future searches."""
     log.info(f"[MEMORY STORE] Storing channel memory: '{content[:60]}...'")
     try:
         ctx = _get_current_request_context()
@@ -96,8 +122,10 @@ def channel_memory_store(content: str) -> str:
             tools=TOOL_PROFILES["memory"](),
             system_prompt=MEMORY_AGENT_PROMPT,
         )
-        result = memory_agent(f"Remember this for future conversations in this channel: {content}")
-        return f"Stored in channel memory: {content}"
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        stamped_content = f"[{timestamp}] {content}"
+        result = memory_agent(f"Remember this for future conversations in this channel: {stamped_content}")
+        return f"Stored in channel memory: {stamped_content}"
     except Exception as e:
         log.warning(f"[MEMORY STORE] Failed: {e}")
         return "Failed to store in channel memory. Continuing without persistence."
@@ -123,6 +151,31 @@ def channel_memory_recall(query: str) -> str:
     except Exception as e:
         log.warning(f"[MEMORY RECALL] Failed: {e}")
         return "No relevant channel memory found."
+
+
+def pre_recall_channel_memory(prompt, channel_id, session_id):
+    """Pre-recall channel memory for the first message in a thread. Returns relevant facts or None."""
+    log.info(f"[PRE-RECALL] Querying channel memory for new session: '{prompt[:60]}...'")
+    try:
+        sm = get_channel_memory_session_manager(channel_id, session_id)
+        if not sm:
+            log.info("[PRE-RECALL] Memory service not configured, skipping.")
+            return None
+        recall_agent = Agent(
+            model=load_model(),
+            session_manager=sm,
+            tools=TOOL_PROFILES["memory"](),
+            system_prompt=PRE_RECALL_PROMPT,
+        )
+        result = str(recall_agent(prompt))
+        if NO_RELEVANT_HISTORY in result:
+            log.info("[PRE-RECALL] No relevant channel history found.")
+            return None
+        log.info(f"[PRE-RECALL] Relevant history found: '{result[:80]}...'")
+        return result
+    except Exception as e:
+        log.warning(f"[PRE-RECALL] Failed: {e}")
+        return None
 
 
 _active_session_id = None
@@ -250,6 +303,18 @@ async def invoke(payload, context):
     if context_block:
         prompt_input = f"{context_block}\n{prompt_input}"
 
+    global _active_session_id
+    _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id}
+    _active_session_id = session_id
+    log.info(f"[REQUEST CONTEXT] Set _request_context for session={session_id}: channel={channel_id}")
+
+    is_new_session = session_id not in _agents
+    if is_new_session and channel_id:
+        pre_recall_result = pre_recall_channel_memory(prompt_input, channel_id, session_id)
+        if pre_recall_result:
+            prompt_input = f"[Channel history]\n{pre_recall_result}\n\n{prompt_input}"
+            log.info("[PRE-RECALL] Injected channel history into prompt context.")
+
     if image_b64:
         log.info("[MODEL CALL] Processing multi-modal input (Text + Image)...")
         prompt_data = [
@@ -259,11 +324,6 @@ async def invoke(payload, context):
     else:
         log.info(f"[MODEL CALL] Invoking main LLM with prompt: '{prompt_input[:60]}...'")
         prompt_data = prompt_input
-
-    global _active_session_id
-    _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id}
-    _active_session_id = session_id
-    log.info(f"[REQUEST CONTEXT] Set _request_context for session={session_id}: channel={channel_id}")
 
     agent = get_or_create_agent(session_id, channel_id)
     stream = agent.stream_async(prompt_data)
