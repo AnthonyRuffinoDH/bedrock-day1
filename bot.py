@@ -1,18 +1,23 @@
 from __future__ import annotations
 import os
 import json
-import re
 import time
 import base64
 import hashlib
 import logging
 import threading
 import requests
-from urllib.parse import urlparse
 from collections import defaultdict
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from herocore_bridge import (
+    load_mcp_tools,
+    build_tool_routing_table,
+    invoke_agentcore_ws as _bridge_invoke_ws,
+    invoke_agentcore_http as _bridge_invoke_http,
+    execute_mcp_tool,
+)
 
 # Configure Detailed Logging
 logging.basicConfig(
@@ -139,388 +144,40 @@ def make_session_id(channel_id, thread_ts):
     digest = hashlib.sha256(raw.encode()).hexdigest()
     return f"slack_{digest}"
 
-def invoke_agentcore(payload, channel_id, thread_ts, include_user_id=False):
-    token = get_cognito_token()
-    url = os.getenv("AGENT_URL")
-
-    session_id = make_session_id(channel_id, thread_ts)
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": session_id,
-    }
-
-    if include_user_id:
-        headers["X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id"] = channel_id
-
-    logger.info(
-        f"[HTTP OUTBOUND] Calling AgentCore API. "
-        f"SlackThread: {thread_ts} | RuntimeSessionId: {session_id} | "
-        f"Action: {payload.get('action', 'standard_invoke')}"
-    )
-
-    response = requests.post(
-        url,
-        headers=headers,
-        json=payload,
-        stream=True,
-    )
-
-    response.raise_for_status()
-
-    full_response = ""
-    for line in response.iter_lines():
-        if line:
-            decoded = line.decode("utf-8")
-            if decoded.startswith("data: "):
-                try:
-                    full_response += json.loads(decoded[6:])
-                except json.JSONDecodeError:
-                    continue
-
-    logger.info(
-        f"[HTTP RESPONSE] Received {len(full_response)} bytes from AgentCore."
-    )
-    return full_response.strip()
-
-
-def _http_url_to_ws(url):
-    """Convert an AgentCore HTTP URL to its WebSocket equivalent.
-
-    Replaces /invocations suffix with /ws, or appends /ws if no /invocations.
-    """
-    parsed = urlparse(url)
-    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
-    path = parsed.path.rstrip("/")
-    if path.endswith("/invocations"):
-        path = path[:-len("/invocations")] + "/ws"
-    else:
-        path = path + "/ws"
-    return f"{ws_scheme}://{parsed.netloc}{path}"
-
-
-def invoke_agentcore_ws(payload, channel_id, thread_ts, include_user_id=False):
-    """Invoke AgentCore via WebSocket. Returns the full response text."""
-    import websocket as ws_client
-
-    token = get_cognito_token()
-    http_url = os.getenv("AGENT_URL")
-    ws_url = _http_url_to_ws(http_url)
-
-    session_id = make_session_id(channel_id, thread_ts)
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": session_id,
-    }
-    if include_user_id:
-        headers["X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id"] = channel_id
-
-    logger.info(
-        f"[WS OUTBOUND] Connecting to AgentCore WebSocket. "
-        f"SlackThread: {thread_ts} | RuntimeSessionId: {session_id} | "
-        f"Action: {payload.get('action', 'standard_invoke')}"
-    )
-
-    conn = ws_client.create_connection(
-        ws_url,
-        header=[f"{k}: {v}" for k, v in headers.items()],
-        timeout=120,
-    )
-
-    try:
-        if _client_tools:
-            schemas = [{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]} for t in _client_tools]
-            payload["client_tools"] = schemas
-            logger.info(f"[MCP INJECT] Injected {len(schemas)} client tool schemas into payload.")
-
-        conn.send(json.dumps(payload))
-
-        full_response = ""
-        while True:
-            try:
-                raw = conn.recv()
-            except ws_client.WebSocketConnectionClosedException:
-                logger.error("[WS DISCONNECT] Connection closed unexpectedly during receive.")
-                if full_response:
-                    return full_response.strip()
-                return "Sorry, the connection to the server was lost. Please try again."
-
-            if not raw:
-                break
-            msg = json.loads(raw)
-            msg_type = msg.get("type")
-
-            if msg_type == "text_delta":
-                full_response += msg.get("content", "")
-            elif msg_type == "done":
-                break
-            elif msg_type == "tool_call":
-                tool_call_id = msg.get("tool_call_id")
-                tool_name = msg.get("name")
-                tool_args = msg.get("args", {})
-                logger.info(f"[WS TOOL_CALL] Received tool_call: {tool_name} (id={tool_call_id})")
-                content = _execute_mcp_tool(tool_name, tool_args)
-                logger.info(f"[WS TOOL_RESULT] Returning result for {tool_name} (id={tool_call_id}): {content[:80]}...")
-                try:
-                    conn.send(json.dumps({
-                        "type": "tool_result",
-                        "tool_call_id": tool_call_id,
-                        "content": content,
-                    }))
-                except ws_client.WebSocketConnectionClosedException:
-                    logger.error("[WS DISCONNECT] Connection closed while sending tool_result.")
-                    return "Sorry, the connection to the server was lost during tool execution. Please try again."
-            elif msg_type == "error":
-                logger.error(f"[WS ERROR] AgentCore returned error: {msg.get('content')}")
-                return f"Sorry, something went wrong: {msg.get('content', 'unknown error')}"
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-    logger.info(f"[WS RESPONSE] Received {len(full_response)} bytes from AgentCore.")
-    result = full_response.strip()
-    if not result:
-        logger.warning("[WS RESPONSE] Empty response from AgentCore — possible agent error.")
-        return "Sorry, I wasn't able to generate a response. Please try again."
-    return result
-
-
 USE_WEBSOCKET = os.getenv("USE_WEBSOCKET", "false").lower() in ("true", "1", "yes")
-MCP_TOOL_TIMEOUT = int(os.getenv("MCP_TOOL_TIMEOUT", "30"))
-
-# --- MCP AUTH HELPERS ---
-
-_ENV_REF_PATTERN = re.compile(r'^\$\{([^}]+)\}$')
-
-
-def _resolve_env_ref(value: str) -> str | None:
-    """Resolve a ${VAR} reference from the environment. Returns None if the var is missing."""
-    m = _ENV_REF_PATTERN.match(value)
-    if not m:
-        return value
-    return os.environ.get(m.group(1))
-
-
-def _resolve_auth_headers(server: dict) -> tuple[dict, str | None]:
-    """Build auth headers from server config. Returns (headers, error_or_none)."""
-    auth = server.get("auth")
-    if not auth:
-        return {}, None
-
-    auth_type = auth.get("type", "")
-    server_name = server.get("name", "unknown")
-
-    if auth_type == "bearer":
-        token = _resolve_env_ref(auth.get("token", ""))
-        if token is None:
-            return {}, f"Error: environment variable for bearer token not set (server '{server_name}')"
-        logger.info(f"[MCP AUTH] Using bearer auth for server '{server_name}'")
-        return {"Authorization": f"Bearer {token}"}, None
-
-    elif auth_type == "header":
-        key = auth.get("key", "")
-        val = _resolve_env_ref(auth.get("value", ""))
-        if val is None:
-            return {}, f"Error: environment variable for header value not set (server '{server_name}')"
-        logger.info(f"[MCP AUTH] Using header auth for server '{server_name}'")
-        return {key: val}, None
-
-    elif auth_type == "basic":
-        username = _resolve_env_ref(auth.get("username", ""))
-        password = _resolve_env_ref(auth.get("password", ""))
-        if username is None or password is None:
-            return {}, f"Error: environment variable for basic auth not set (server '{server_name}')"
-        encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
-        logger.info(f"[MCP AUTH] Using basic auth for server '{server_name}'")
-        return {"Authorization": f"Basic {encoded}"}, None
-
-    else:
-        logger.warning(f"[MCP AUTH] Unknown auth type '{auth_type}' for server '{server_name}', skipping auth")
-        return {}, None
-
 
 # --- MCP TOOL CONFIG ---
-
-_client_tools = []
-
-def _load_mcp_tools():
-    """Load local MCP tool schemas from mcp_tools.json. Returns list of tool dicts."""
-    config_path = os.path.join(os.path.dirname(__file__) or ".", "mcp_tools.json")
-    if not os.path.exists(config_path):
-        logger.info("[MCP CONFIG] No mcp_tools.json found. Starting without client tools.")
-        return []
-    try:
-        with open(config_path) as f:
-            config = json.load(f)
-        servers = config.get("servers", [])
-        tools = []
-        for server in servers:
-            server_name = server.get("name", "unknown")
-            for t in server.get("tools", []):
-                t["_server"] = server_name
-                t["_command"] = server.get("command")
-                t["_transport"] = server.get("transport", "stdio")
-                t["_url"] = server.get("url")
-                t["_auth"] = server.get("auth")
-                tools.append(t)
-        logger.info(f"[MCP CONFIG] Loaded {len(tools)} client tools from {len(servers)} servers.")
-        return tools
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.error(f"[MCP CONFIG] Failed to parse mcp_tools.json: {e}. Starting without client tools.")
-        return []
-    except Exception as e:
-        logger.error(f"[MCP CONFIG] Unexpected error loading mcp_tools.json: {e}. Starting without client tools.")
-        return []
-
-_client_tools = _load_mcp_tools()
-
-# Build lookup: tool_name -> server config for routing
-_tool_to_server = {}
-for _t in _client_tools:
-    _tool_to_server[_t["name"]] = {
-        "name": _t.get("_server"),
-        "command": _t.get("_command"),
-        "transport": _t.get("_transport", "stdio"),
-        "url": _t.get("_url"),
-        "auth": _t.get("_auth"),
-    }
-
-
-def _execute_mcp_tool(tool_name, args):
-    """Execute a tool call against its configured local MCP server via stdio or HTTP."""
-    server = _tool_to_server.get(tool_name)
-    if not server:
-        return f"Error: no MCP server configured for tool '{tool_name}'"
-
-    transport = server.get("transport", "stdio")
-    logger.info(f"[MCP EXEC] Calling tool '{tool_name}' via {server['name']} (transport={transport})")
-
-    if transport == "http":
-        return _execute_mcp_tool_http(tool_name, args, server)
-    return _execute_mcp_tool_stdio(tool_name, args, server)
-
-
-def _execute_mcp_tool_stdio(tool_name, args, server):
-    """Execute a tool call via stdio subprocess JSON-RPC."""
-    import subprocess
-
-    if not server.get("command"):
-        return f"Error: no command configured for stdio server '{server['name']}'"
-
-    rpc_request = json.dumps({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": tool_name, "arguments": args},
-    })
-
-    try:
-        result = subprocess.run(
-            server["command"],
-            input=rpc_request,
-            capture_output=True,
-            text=True,
-            timeout=MCP_TOOL_TIMEOUT,
-        )
-        if result.returncode != 0:
-            logger.warning(f"[MCP EXEC] Server {server['name']} exited with code {result.returncode}: {result.stderr[:200]}")
-            return f"Error: MCP server exited with code {result.returncode}: {result.stderr[:200]}"
-
-        return _parse_rpc_response(result.stdout)
-
-    except subprocess.TimeoutExpired:
-        logger.warning(f"[MCP EXEC] Tool '{tool_name}' timed out after {MCP_TOOL_TIMEOUT}s")
-        return f"Error: tool execution timed out after {MCP_TOOL_TIMEOUT}s"
-    except FileNotFoundError:
-        logger.error(f"[MCP EXEC] Command not found: {server['command']}")
-        return f"Error: MCP server command not found: {server['command'][0]}"
-    except Exception as e:
-        logger.error(f"[MCP EXEC] Unexpected error executing tool '{tool_name}': {e}")
-        return f"Error: {e}"
-
-
-def _execute_mcp_tool_http(tool_name, args, server):
-    """Execute a tool call via MCP Streamable HTTP (POST JSON-RPC to server URL)."""
-    url = server.get("url")
-    if not url:
-        return f"Error: no url configured for HTTP server '{server['name']}'"
-
-    auth_headers, auth_error = _resolve_auth_headers(server)
-    if auth_error:
-        logger.warning(f"[MCP EXEC] Auth resolution failed for tool '{tool_name}': {auth_error}")
-        return auth_error
-
-    rpc_request = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": tool_name, "arguments": args},
-    }
-
-    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    headers.update(auth_headers)
-
-    try:
-        resp = requests.post(
-            url,
-            json=rpc_request,
-            headers=headers,
-            timeout=MCP_TOOL_TIMEOUT,
-        )
-        resp.raise_for_status()
-
-        content_type = resp.headers.get("Content-Type", "")
-        if "text/event-stream" in content_type:
-            return _parse_sse_response(resp.text)
-
-        return _parse_rpc_response(resp.text)
-
-    except requests.Timeout:
-        logger.warning(f"[MCP EXEC] HTTP tool '{tool_name}' timed out after {MCP_TOOL_TIMEOUT}s")
-        return f"Error: tool execution timed out after {MCP_TOOL_TIMEOUT}s"
-    except requests.RequestException as e:
-        logger.error(f"[MCP EXEC] HTTP error calling tool '{tool_name}': {e}")
-        return f"Error: {e}"
-    except Exception as e:
-        logger.error(f"[MCP EXEC] Unexpected error executing tool '{tool_name}': {e}")
-        return f"Error: {e}"
-
-
-def _parse_rpc_response(raw):
-    """Parse a JSON-RPC response and extract MCP content."""
-    try:
-        rpc_response = json.loads(raw)
-        if "error" in rpc_response:
-            return f"Error: {rpc_response['error'].get('message', 'unknown MCP error')}"
-        rpc_result = rpc_response.get("result", {})
-        content_parts = rpc_result.get("content", [])
-        return "\n".join(p.get("text", str(p)) for p in content_parts) if content_parts else str(rpc_result)
-    except json.JSONDecodeError:
-        return raw.strip() or "Error: empty response from MCP server"
-
-
-def _parse_sse_response(raw):
-    """Parse an SSE stream for the JSON-RPC response event."""
-    for line in raw.split("\n"):
-        if line.startswith("data: "):
-            data = line[6:].strip()
-            if data:
-                return _parse_rpc_response(data)
-    return "Error: no data event in SSE response"
+_mcp_config_path = os.path.join(os.path.dirname(__file__) or ".", "mcp_tools.json")
+_client_tools = load_mcp_tools(_mcp_config_path)
+_tool_to_server = build_tool_routing_table(_client_tools)
 
 
 def invoke_agentcore_auto(payload, channel_id, thread_ts, include_user_id=False):
     """Route to WebSocket or HTTP based on USE_WEBSOCKET env var. Falls back to HTTP on WS failure."""
+    session_id = make_session_id(channel_id, thread_ts)
+    agent_url = os.getenv("AGENT_URL")
+    user_id = channel_id if include_user_id else None
+
     if USE_WEBSOCKET:
         try:
-            return invoke_agentcore_ws(payload, channel_id, thread_ts, include_user_id)
+            return _bridge_invoke_ws(
+                payload,
+                agent_url=agent_url,
+                cognito_token_fn=get_cognito_token,
+                session_id=session_id,
+                user_id=user_id,
+                client_tools=_client_tools or None,
+                routing_table=_tool_to_server,
+            )
         except Exception as e:
             logger.warning(f"[WS FALLBACK] WebSocket invocation failed ({e}), falling back to HTTP.")
-    return invoke_agentcore(payload, channel_id, thread_ts, include_user_id)
+    return _bridge_invoke_http(
+        payload,
+        agent_url=agent_url,
+        cognito_token_fn=get_cognito_token,
+        session_id=session_id,
+        user_id=user_id,
+    )
 
 
 def download_slack_image(files):

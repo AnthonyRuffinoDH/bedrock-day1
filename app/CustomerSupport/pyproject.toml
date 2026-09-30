@@ -12,10 +12,14 @@ dependencies = [
     "aws-opentelemetry-distro ~= 0.18.0",
     "bedrock-agentcore >= 1.9.1",
     "botocore[crt] >= 1.35.0",
+    "herocore-bridge[agentcore]",
     "mcp ~= 1.24.0",
     "pyjwt>=2.15.1",
     "strands-agents >= 1.15.0",
 ]
+
+[tool.uv.sources]
+herocore-bridge = { path = "../../packages/herocore-bridge/dist/herocore_bridge-0.1.0-py3-none-any.whl" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

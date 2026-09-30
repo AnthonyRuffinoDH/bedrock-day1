@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "herocore-bridge"
+version = "0.1.0"
+description = "WebSocket/MCP tool proxy bridge between Slack harness and AgentCore runtime"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.31.0",
+    "websocket-client>=1.6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+agentcore = [
+    "strands-agents>=1.15.0",
+    "bedrock-agentcore>=1.9.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/herocore_bridge"]
