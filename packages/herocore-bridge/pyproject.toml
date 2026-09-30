@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "herocore-bridge"
+version = "0.1.0"
+description = "WebSocket RPC bridge between the Slack harness and AgentCore — packaged for reuse across Delivery Hero teams"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [
+    { name = "Delivery Hero AI Platform" },
+]
+keywords = ["agentcore", "mcp", "websocket", "slack", "llm-tools"]
+dependencies = [
+    "requests>=2.31.0",
+    "websocket-client>=1.6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+# AgentCore-side extras (only needed in the cloud app, not in the Slack harness)
+agentcore = [
+    "strands-agents>=1.15.0",
+    "bedrock-agentcore>=1.9.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["herocore_bridge"]
+
+# ---------------------------------------------------------------------------
+# Distribution notes
+# ---------------------------------------------------------------------------
+# Short-term  : pip install git+https://github.com/AnthonyRuffinoDH/bedrock-day1.git#subdirectory=packages/herocore-bridge
+# Medium-term : GitHub Packages PyPI feed  (pip install --index-url https://pypi.pkg.github.com/AnthonyRuffinoDH herocore-bridge)
+# Enterprise  : AWS CodeArtifact domain    (integrates cleanly with existing AWS infra)
