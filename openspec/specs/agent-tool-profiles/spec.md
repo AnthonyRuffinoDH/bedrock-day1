@@ -8,12 +8,12 @@ Provides independently configurable tool sets for the primary conversational age
 
 ### Requirement: Primary agent receives full toolset
 
-The primary conversational agent SHALL be constructed with the complete application toolset: domain-specific tools (product info, return policy), MCP clients (web search, gateway), and memory tools (channel store, channel recall).
+The primary conversational agent SHALL be constructed with the complete application toolset: filesystem tools (read file, list directory, search files, get file info), MCP clients (web search, gateway), and memory tools (channel store, channel recall).
 
 #### Scenario: Primary agent tool inventory
 
 - **WHEN** the primary agent is constructed for a standard invocation
-- **THEN** its tool list includes domain tools, available MCP clients, and channel memory tools
+- **THEN** its tool list includes filesystem tools, available MCP clients, and channel memory tools
 
 ### Requirement: Nested memory agent receives restricted toolset
 
