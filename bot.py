@@ -6,6 +6,7 @@ import hashlib
 import logging
 import threading
 import requests
+from urllib.parse import urlparse
 from collections import defaultdict
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -181,6 +182,89 @@ def invoke_agentcore(payload, channel_id, thread_ts, include_user_id=False):
     )
     return full_response.strip()
 
+
+def _http_url_to_ws(url):
+    """Convert an AgentCore HTTP URL to its WebSocket equivalent.
+
+    Replaces /invocations suffix with /ws, or appends /ws if no /invocations.
+    """
+    parsed = urlparse(url)
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    path = parsed.path.rstrip("/")
+    if path.endswith("/invocations"):
+        path = path[:-len("/invocations")] + "/ws"
+    else:
+        path = path + "/ws"
+    return f"{ws_scheme}://{parsed.netloc}{path}"
+
+
+def invoke_agentcore_ws(payload, channel_id, thread_ts, include_user_id=False):
+    """Invoke AgentCore via WebSocket. Returns the full response text."""
+    import websocket as ws_client
+
+    token = get_cognito_token()
+    http_url = os.getenv("AGENT_URL")
+    ws_url = _http_url_to_ws(http_url)
+
+    session_id = make_session_id(channel_id, thread_ts)
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": session_id,
+    }
+    if include_user_id:
+        headers["X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id"] = channel_id
+
+    logger.info(
+        f"[WS OUTBOUND] Connecting to AgentCore WebSocket. "
+        f"SlackThread: {thread_ts} | RuntimeSessionId: {session_id} | "
+        f"Action: {payload.get('action', 'standard_invoke')}"
+    )
+
+    conn = ws_client.create_connection(
+        ws_url,
+        header=[f"{k}: {v}" for k, v in headers.items()],
+        timeout=120,
+    )
+
+    try:
+        conn.send(json.dumps(payload))
+
+        full_response = ""
+        while True:
+            raw = conn.recv()
+            if not raw:
+                break
+            msg = json.loads(raw)
+            msg_type = msg.get("type")
+
+            if msg_type == "text_delta":
+                full_response += msg.get("content", "")
+            elif msg_type == "done":
+                break
+            elif msg_type == "error":
+                logger.error(f"[WS ERROR] AgentCore returned error: {msg.get('content')}")
+                return f"Sorry, something went wrong: {msg.get('content', 'unknown error')}"
+    finally:
+        conn.close()
+
+    logger.info(f"[WS RESPONSE] Received {len(full_response)} bytes from AgentCore.")
+    return full_response.strip()
+
+
+USE_WEBSOCKET = os.getenv("USE_WEBSOCKET", "false").lower() in ("true", "1", "yes")
+
+
+def invoke_agentcore_auto(payload, channel_id, thread_ts, include_user_id=False):
+    """Route to WebSocket or HTTP based on USE_WEBSOCKET env var. Falls back to HTTP on WS failure."""
+    if USE_WEBSOCKET:
+        try:
+            return invoke_agentcore_ws(payload, channel_id, thread_ts, include_user_id)
+        except Exception as e:
+            logger.warning(f"[WS FALLBACK] WebSocket invocation failed ({e}), falling back to HTTP.")
+    return invoke_agentcore(payload, channel_id, thread_ts, include_user_id)
+
+
 def download_slack_image(files):
     if not files:
         return None
@@ -282,7 +366,7 @@ def handle_message(body, logger, say):
             logger.info("[GATE] AMBIENT message detected. Evaluating intent via AgentCore...")
             react(channel_id, ts, "thinking_face")
             
-            gate_eval = invoke_agentcore({
+            gate_eval = invoke_agentcore_auto({
                 "action": "evaluate_gate",
                 "prompt": text,
                 "thread_context": {
@@ -349,7 +433,7 @@ def handle_message(body, logger, say):
         if image_b64:
             payload["image_b64"] = image_b64
 
-        agent_reply = invoke_agentcore(payload, channel_id, thread_ts)
+        agent_reply = invoke_agentcore_auto(payload, channel_id, thread_ts)
         
         # Post answer and update reactions
         say(text=agent_reply, thread_ts=thread_ts)

@@ -331,5 +331,128 @@ async def invoke(payload, context):
         if "data" in event and isinstance(event["data"], str):
             yield event["data"]
 
+@app.websocket
+async def ws_invoke(websocket, context):
+    await websocket.accept()
+
+    try:
+        raw = await websocket.receive_text()
+        payload = json.loads(raw)
+    except Exception as e:
+        await websocket.send_json({"type": "error", "content": str(e)})
+        await websocket.close()
+        return
+
+    log.info(f"[WS INVOKE] Received payload keys: {list(payload.keys())}")
+
+    session_id = context.session_id
+    if not session_id:
+        await websocket.send_json({"type": "error", "content": "session_id is required"})
+        await websocket.close()
+        return
+
+    action = payload.get("action")
+
+    # --- Gate evaluation over WebSocket ---
+    if action == "evaluate_gate":
+        log.info("[WS GATE] Running ambient message classification...")
+        prompt_text = payload.get("prompt", "")
+        tc = payload.get("thread_context", {})
+        speaker_info = tc.get("speaker", {})
+        thread_info = tc.get("thread", {})
+        bot_participated = thread_info.get("bot_has_participated", False)
+        sole_human = thread_info.get("sender_is_sole_human", True)
+        recent = thread_info.get("recent_messages", [])
+
+        thread_summary = ""
+        if recent:
+            thread_summary = "\nRecent thread messages:\n" + "\n".join(
+                f"  {m.get('display_name', 'unknown')}: {m.get('text', '')}" for m in recent[-5:]
+            )
+
+        eval_prompt = (
+            f"You are a help-biased channel routing classifier for a customer support bot.\n\n"
+            f"Message from {speaker_info.get('display_name', 'unknown')}: \"{prompt_text}\"\n\n"
+            f"Thread signals:\n"
+            f"- Bot has already participated in this thread: {bot_participated}\n"
+            f"- Sender is the only human in this thread: {sole_human}\n"
+            f"{thread_summary}\n\n"
+            f"Classification rules (apply in order):\n"
+            f"1. If the message requests gambling, sports betting advice, or violates policies → {{\"action\": \"INAPPROPRIATE\"}}\n"
+            f"2. If the bot has already participated in this thread, RESPOND unless the message is clearly a social sign-off (e.g., \"thanks\", \"bye\") → {{\"action\": \"RESPOND\"}}\n"
+            f"3. If the message plausibly asks for help, asks a question, or could be a customer support request → {{\"action\": \"RESPOND\"}}\n"
+            f"4. If the message is clearly human-to-human chatter, a social acknowledgement, or unrelated to support → {{\"action\": \"IGNORE\"}}\n"
+            f"5. If ambiguous, default to → {{\"action\": \"RESPOND\"}}\n\n"
+            f"Output ONLY valid raw JSON."
+        )
+        evaluator = Agent(
+            model=load_model(),
+            system_prompt="Output strict JSON only. Do not format as markdown."
+        )
+        full_text = ""
+        stream = evaluator.stream_async(eval_prompt)
+        async for event in stream:
+            if "data" in event and isinstance(event["data"], str):
+                chunk = event["data"]
+                full_text += chunk
+                await websocket.send_json({"type": "text_delta", "content": chunk})
+
+        await websocket.send_json({"type": "done"})
+        await websocket.close()
+        return
+
+    # --- Standard invocation over WebSocket ---
+    prompt_input = payload.get("prompt", "")
+    image_b64 = payload.get("image_b64")
+    speaker_meta = payload.get("speaker", {})
+    channel_id = payload.get("channel_id", "")
+    thread_ctx = payload.get("thread_context", {})
+
+    context_block = ""
+    if speaker_meta:
+        context_block += f"[Speaker: {speaker_meta.get('display_name', 'unknown')}]\n"
+    if channel_id:
+        context_block += f"[Channel: {channel_id}]\n"
+    thread_info = thread_ctx.get("thread", {})
+    recent = thread_info.get("recent_messages", [])
+    if recent:
+        context_block += "[Recent thread messages]\n"
+        for m in recent:
+            context_block += f"  {m.get('display_name', 'unknown')}: {m.get('text', '')}\n"
+    if context_block:
+        prompt_input = f"{context_block}\n{prompt_input}"
+
+    global _active_session_id
+    _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id}
+    _active_session_id = session_id
+    log.info(f"[WS REQUEST CONTEXT] Set _request_context for session={session_id}: channel={channel_id}")
+
+    is_new_session = session_id not in _agents
+    if is_new_session and channel_id:
+        pre_recall_result = pre_recall_channel_memory(prompt_input, channel_id, session_id)
+        if pre_recall_result:
+            prompt_input = f"[Channel history]\n{pre_recall_result}\n\n{prompt_input}"
+            log.info("[WS PRE-RECALL] Injected channel history into prompt context.")
+
+    if image_b64:
+        log.info("[WS MODEL CALL] Processing multi-modal input (Text + Image)...")
+        prompt_data = [
+            {"type": "text", "text": prompt_input or "Please describe and analyze this image."},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
+        ]
+    else:
+        log.info(f"[WS MODEL CALL] Invoking main LLM with prompt: '{prompt_input[:60]}...'")
+        prompt_data = prompt_input
+
+    agent = get_or_create_agent(session_id, channel_id)
+    stream = agent.stream_async(prompt_data)
+    async for event in stream:
+        if "data" in event and isinstance(event["data"], str):
+            await websocket.send_json({"type": "text_delta", "content": event["data"]})
+
+    await websocket.send_json({"type": "done"})
+    await websocket.close()
+
+
 if __name__ == "__main__":
     app.run()
