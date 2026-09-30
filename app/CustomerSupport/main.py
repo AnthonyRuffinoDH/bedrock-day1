@@ -16,6 +16,8 @@ import uuid
 from typing import Any
 from datetime import datetime, timezone
 
+import httpx
+
 app = BedrockAgentCoreApp()
 log = app.logger
 log.setLevel(logging.INFO)
@@ -39,24 +41,50 @@ def _ns_tool(namespace, func):
     return tool(wrapper)
 
 
-SYSTEM_PROMPT = """You are a helpful and professional customer support assistant deployed as a Slack bot.
+SYSTEM_PROMPT = """You are Herocore, an autonomous, self-improving AI system deployed via a Slack WebSocket harness.
+Your primary directive is to understand your own architecture, explore your codebase, and propose structural improvements to your capabilities.
 
 <conversational_context>
 Your primary source of conversational context is the recent thread messages included with each request. Use these to understand the ongoing conversation. You do not automatically have access to persistent memory.
 </conversational_context>
 
-<memory_tools>
-You have two optional tools for persistent channel memory:
-- agent__channel_memory_store: Save information that will be useful in future conversations in this channel. Use only for durably valuable knowledge (e.g., recurring issues, team preferences, important decisions).
-- agent__channel_memory_recall: Query previously stored channel knowledge when prior context would materially improve your response.
+<default_tools>
+You have agent-side tools available by default. All tool invocations go through AgentCore — never make raw LLM calls.
 
-Guidelines:
-- Do NOT store routine support interactions. Only store information likely to remain useful beyond the current thread.
-- When storing updates or resolutions to previously stored facts, always include the original topic and prior status in the content so future searches find the update. For example: "RESOLVED: The stale product catalog issue originally reported as ongoing is now fixed" or "UPDATED: Team return policy preference changed from store credit to full refund."
+Filesystem tools (read-only, scoped to your allowed directory):
+- agent__read_file: Read file contents
+- agent__list_directory: List directory entries with [FILE]/[DIR] prefixes
+- agent__search_files: Recursively search for files matching a glob pattern
+- agent__get_file_info: Get file metadata (size, modification time, type)
+
+HTTP tools (for fetching web content):
+- agent__http_get: Fetch a URL and extract relevant content via a nested extraction agent
+- agent__http_head: Get response status and headers without downloading the body
+
+Memory tools (persistent channel knowledge):
+- agent__channel_memory_store: Save durably valuable knowledge for future conversations in this channel
+- agent__channel_memory_recall: Query previously stored channel knowledge
+</default_tools>
+
+<client_tools>
+You should also expect additional tools provided by the client/harness via MCP. These client-side tools (prefixed with client__) enable capabilities like code exploration, file modification, testing, and other development operations. When client tools are present, use them to carry out implementation work. When absent, operate with your default agent-side tools.
+</client_tools>
+
+<operating_procedure>
+When a user asks you to improve or modify a feature, follow this loop:
+1. EXPLORE: Use your filesystem and client tools to progressively disclose and read the relevant source code files. Never guess how your code works — always read it first.
+2. ANALYZE: Identify exactly what needs to be changed in both the harness and the core to achieve the goal.
+3. PROPOSE: Output a formal proposal detailing the architecture changes, the specific files to modify, and the sequence of execution.
+</operating_procedure>
+
+<memory_guidelines>
+Guidelines for memory tools:
+- Do NOT store routine interactions. Only store information likely to remain useful beyond the current thread.
+- When storing updates or resolutions to previously stored facts, always include the original topic and prior status in the content so future searches find the update.
 - When you recall memory, treat it as supporting context, not authoritative. The active thread is always the primary source of truth.
 - If recalled memory conflicts with what is visible in the current thread, trust the thread.
 - Memory is optional. If a memory operation fails, continue the conversation normally.
-</memory_tools>
+</memory_guidelines>
 
 <memory_reconciliation>
 IMPORTANT — you MUST follow these rules when using recalled memory:
@@ -66,13 +94,9 @@ IMPORTANT — you MUST follow these rules when using recalled memory:
 - If only one entry is returned about an issue, explicitly note that you cannot confirm whether it is still current.
 </memory_reconciliation>
 
-<support_guidelines>
-Your role is to:
-- Provide accurate information using the tools available to you.
-- Be friendly, patient, and understanding with customers.
-- Always use tools to get accurate, up-to-date information rather than guessing.
-- You can explore files and directories within your allowed directory using the filesystem tools (agent__read_file, agent__list_directory, agent__search_files, agent__get_file_info).
-</support_guidelines>"""
+<future_context>
+Your immediate evolutionary goal is to integrate a GitHub MCP tool so you can turn your proposals into actual Pull Requests. Keep this in mind as you design your upgrades.
+</future_context>"""
 
 # --- Filesystem Tools ---
 
@@ -146,6 +170,76 @@ def get_file_info(path: str) -> str:
     file_type = "directory" if os.path.isdir(resolved) else "file"
     mod_time = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"Type: {file_type}, Size: {stat.st_size} bytes, Modified: {mod_time}"
+
+# --- HTTP Tools ---
+
+HTTP_TOOL_TIMEOUT = int(os.environ.get("HTTP_TOOL_TIMEOUT", "15"))
+HTTP_MAX_RESPONSE_SIZE = int(os.environ.get("HTTP_MAX_RESPONSE_SIZE", "102400"))
+
+WEB_EXTRACTION_PROMPT = """You are a web content extraction agent. You will receive raw web content \
+fetched from a URL, along with recent thread context from the conversation that triggered this fetch.
+
+Your job is to extract and return ONLY the information from the raw content that is relevant to the \
+current conversation thread. Discard navigation, ads, boilerplate, and any content not related to \
+what the user is asking about.
+
+Return the relevant information concisely and factually. If the raw content contains no information \
+relevant to the thread context, say so briefly."""
+
+def http_head(url: str, headers: dict | None = None) -> str:
+    """Perform an HTTP HEAD request and return the response status code and headers."""
+    log.info(f"[TOOL EXECUTION] http_head called with url: '{url}'")
+    try:
+        with httpx.Client(timeout=HTTP_TOOL_TIMEOUT) as client:
+            resp = client.head(url, headers=headers or {})
+        header_lines = "\n".join(f"  {k}: {v}" for k, v in resp.headers.items())
+        return f"Status: {resp.status_code}\nHeaders:\n{header_lines}"
+    except Exception as e:
+        return f"HTTP HEAD failed for {url}: {e}"
+
+
+def http_get(url: str, headers: dict | None = None) -> str:
+    """Fetch a URL via HTTP GET and return content extracted by a nested agent, filtered for relevance to the current conversation."""
+    log.info(f"[TOOL EXECUTION] http_get called with url: '{url}'")
+    try:
+        with httpx.Client(timeout=HTTP_TOOL_TIMEOUT) as client:
+            resp = client.get(url, headers=headers or {})
+        body = resp.text
+        truncated = False
+        if len(body) > HTTP_MAX_RESPONSE_SIZE:
+            body = body[:HTTP_MAX_RESPONSE_SIZE]
+            truncated = True
+    except Exception as e:
+        return f"HTTP GET failed for {url}: {e}"
+
+    precontext = ""
+    try:
+        ctx = _get_current_request_context()
+        precontext = ctx.get("thread_precontext", "")
+    except RuntimeError:
+        pass
+
+    extraction_input = f"URL: {url}\n"
+    if truncated:
+        extraction_input += "[Note: Response was truncated to the configured size limit.]\n"
+    extraction_input += f"\n--- Raw Content ---\n{body}\n--- End Raw Content ---\n"
+    if precontext:
+        extraction_input += f"\n--- Thread Context ---\n{precontext}\n--- End Thread Context ---\n"
+
+    try:
+        extraction_agent = Agent(
+            model=load_model(),
+            system_prompt=WEB_EXTRACTION_PROMPT,
+            tools=[],
+        )
+        result = extraction_agent(extraction_input)
+        return str(result)
+    except Exception as e:
+        log.warning(f"[HTTP GET] Extraction agent failed: {e}")
+        if truncated:
+            return f"[Truncated to {HTTP_MAX_RESPONSE_SIZE} bytes]\n{body}"
+        return body
+
 
 MEMORY_AGENT_PROMPT = """You are a memory storage and retrieval agent. Process the request and respond concisely.
 
@@ -245,11 +339,12 @@ def _get_current_request_context():
 
 
 _filesystem_tools = [_ns_tool(AGENT_NS, f) for f in [read_file, list_directory, search_files, get_file_info]]
+_http_tools = [_ns_tool(AGENT_NS, f) for f in [http_get, http_head]]
 _mcp_tools = [c for c in mcp_clients if c]
 _memory_tools = [_ns_tool(AGENT_NS, f) for f in [channel_memory_store, channel_memory_recall]]
 
 TOOL_PROFILES = {
-    "primary": lambda: _filesystem_tools + _mcp_tools + _memory_tools,
+    "primary": lambda: _filesystem_tools + _http_tools + _mcp_tools + _memory_tools,
     "memory": lambda: [],
 }
 
@@ -361,7 +456,7 @@ async def invoke(payload, context):
         prompt_input = f"{context_block}\n{prompt_input}"
 
     global _active_session_id
-    _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id}
+    _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id, "thread_precontext": context_block}
     _active_session_id = session_id
     log.info(f"[REQUEST CONTEXT] Set _request_context for session={session_id}: channel={channel_id}")
 
@@ -565,7 +660,7 @@ async def ws_invoke(websocket, context):
         prompt_input = f"{context_block}\n{prompt_input}"
 
     global _active_session_id
-    _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id}
+    _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id, "thread_precontext": context_block}
     _active_session_id = session_id
     log.info(f"[WS REQUEST CONTEXT] Set _request_context for session={session_id}: channel={channel_id}")
 
