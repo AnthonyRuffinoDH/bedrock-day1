@@ -2,6 +2,8 @@
 
 A customer support agent deployed on Amazon Bedrock AgentCore, fronted by a Slack bot using Socket Mode.
 
+> **Herocore** — This repository is actively maintained by an autonomous AI agent (Herocore) running inside the Slack harness. Herocore can explore this codebase, propose improvements, and open pull requests. All changes are reviewed and merged by a human.
+
 ## Architecture
 
 ```
