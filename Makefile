@@ -1,4 +1,4 @@
-.PHONY: init install setup-cognito setup-agent-url deploy run-harness curl-test up down setup
+.PHONY: init install setup-cognito setup-agent-url setup-github deploy run-harness curl-test up down setup
 
 init:
 	@if [ ! -f .env ]; then \
@@ -78,8 +78,20 @@ setup-agent-url:
 	echo "  AGENT_URL=$$URL"; \
 	echo "Done — agent URL written to .env"
 
-# Full setup: init + discover all AWS config. Only Slack tokens need manual entry.
-setup: init setup-cognito setup-agent-url
+setup-github:
+	@if grep -q '^GITHUB_TOKEN=.' .env 2>/dev/null; then \
+		echo "  GITHUB_TOKEN is configured in .env"; \
+	elif [ -n "$$GITHUB_TOKEN" ]; then \
+		sed -i "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=$$GITHUB_TOKEN|" .env; \
+		echo "  GITHUB_TOKEN populated from environment"; \
+	else \
+		echo "  ⚠ GITHUB_TOKEN not set. GitHub MCP will not work until configured in .env"; \
+		echo "    Create a token at: https://github.com/settings/tokens"; \
+		echo "    Minimum scopes: repo (private) or public_repo (public only)"; \
+	fi
+
+# Full setup: init + discover all AWS config + check GitHub token. Only Slack tokens need manual entry.
+setup: init setup-cognito setup-agent-url setup-github
 	@echo ""; \
 	echo "========================================"; \
 	echo "  AWS setup complete!"; \

@@ -8,6 +8,7 @@ services:
     restart: unless-stopped
     depends_on:
       - mcp-filesystem
+      - mcp-github
 
   mcp-filesystem:
     build:
@@ -15,4 +16,9 @@ services:
       dockerfile: Dockerfile.mcp-filesystem
     volumes:
       - .:/workspace:ro
+    restart: unless-stopped
+
+  mcp-github:
+    image: ghcr.io/github/github-mcp-server
+    command: ["http"]
     restart: unless-stopped

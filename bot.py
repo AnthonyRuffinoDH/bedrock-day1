@@ -1,5 +1,7 @@
+from __future__ import annotations
 import os
 import json
+import re
 import time
 import base64
 import hashlib
@@ -290,6 +292,57 @@ def invoke_agentcore_ws(payload, channel_id, thread_ts, include_user_id=False):
 USE_WEBSOCKET = os.getenv("USE_WEBSOCKET", "false").lower() in ("true", "1", "yes")
 MCP_TOOL_TIMEOUT = int(os.getenv("MCP_TOOL_TIMEOUT", "30"))
 
+# --- MCP AUTH HELPERS ---
+
+_ENV_REF_PATTERN = re.compile(r'^\$\{([^}]+)\}$')
+
+
+def _resolve_env_ref(value: str) -> str | None:
+    """Resolve a ${VAR} reference from the environment. Returns None if the var is missing."""
+    m = _ENV_REF_PATTERN.match(value)
+    if not m:
+        return value
+    return os.environ.get(m.group(1))
+
+
+def _resolve_auth_headers(server: dict) -> tuple[dict, str | None]:
+    """Build auth headers from server config. Returns (headers, error_or_none)."""
+    auth = server.get("auth")
+    if not auth:
+        return {}, None
+
+    auth_type = auth.get("type", "")
+    server_name = server.get("name", "unknown")
+
+    if auth_type == "bearer":
+        token = _resolve_env_ref(auth.get("token", ""))
+        if token is None:
+            return {}, f"Error: environment variable for bearer token not set (server '{server_name}')"
+        logger.info(f"[MCP AUTH] Using bearer auth for server '{server_name}'")
+        return {"Authorization": f"Bearer {token}"}, None
+
+    elif auth_type == "header":
+        key = auth.get("key", "")
+        val = _resolve_env_ref(auth.get("value", ""))
+        if val is None:
+            return {}, f"Error: environment variable for header value not set (server '{server_name}')"
+        logger.info(f"[MCP AUTH] Using header auth for server '{server_name}'")
+        return {key: val}, None
+
+    elif auth_type == "basic":
+        username = _resolve_env_ref(auth.get("username", ""))
+        password = _resolve_env_ref(auth.get("password", ""))
+        if username is None or password is None:
+            return {}, f"Error: environment variable for basic auth not set (server '{server_name}')"
+        encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
+        logger.info(f"[MCP AUTH] Using basic auth for server '{server_name}'")
+        return {"Authorization": f"Basic {encoded}"}, None
+
+    else:
+        logger.warning(f"[MCP AUTH] Unknown auth type '{auth_type}' for server '{server_name}', skipping auth")
+        return {}, None
+
+
 # --- MCP TOOL CONFIG ---
 
 _client_tools = []
@@ -312,6 +365,7 @@ def _load_mcp_tools():
                 t["_command"] = server.get("command")
                 t["_transport"] = server.get("transport", "stdio")
                 t["_url"] = server.get("url")
+                t["_auth"] = server.get("auth")
                 tools.append(t)
         logger.info(f"[MCP CONFIG] Loaded {len(tools)} client tools from {len(servers)} servers.")
         return tools
@@ -332,6 +386,7 @@ for _t in _client_tools:
         "command": _t.get("_command"),
         "transport": _t.get("_transport", "stdio"),
         "url": _t.get("_url"),
+        "auth": _t.get("_auth"),
     }
 
 
@@ -394,6 +449,11 @@ def _execute_mcp_tool_http(tool_name, args, server):
     if not url:
         return f"Error: no url configured for HTTP server '{server['name']}'"
 
+    auth_headers, auth_error = _resolve_auth_headers(server)
+    if auth_error:
+        logger.warning(f"[MCP EXEC] Auth resolution failed for tool '{tool_name}': {auth_error}")
+        return auth_error
+
     rpc_request = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -401,11 +461,14 @@ def _execute_mcp_tool_http(tool_name, args, server):
         "params": {"name": tool_name, "arguments": args},
     }
 
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    headers.update(auth_headers)
+
     try:
         resp = requests.post(
             url,
             json=rpc_request,
-            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+            headers=headers,
             timeout=MCP_TOOL_TIMEOUT,
         )
         resp.raise_for_status()
