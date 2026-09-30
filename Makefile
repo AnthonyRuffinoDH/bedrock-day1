@@ -122,6 +122,17 @@ setup: init setup-cognito setup-agent-url
 install:
 	python3 -m venv .venv
 	.venv/bin/pip install -r requirements.txt
+	@if ! docker compose version >/dev/null 2>&1; then \
+		echo "Installing docker compose plugin..."; \
+		mkdir -p ~/.docker/cli-plugins; \
+		ARCH=$$(uname -m); \
+		curl -fsSL "https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-$$ARCH" \
+			-o ~/.docker/cli-plugins/docker-compose; \
+		chmod +x ~/.docker/cli-plugins/docker-compose; \
+		echo "Installed: $$(docker compose version)"; \
+	else \
+		echo "docker compose already available: $$(docker compose version)"; \
+	fi
 
 deploy:
 	agentcore deploy -y -v
@@ -133,20 +144,12 @@ curl-test:
 	.venv/bin/python generate_curl.py
 
 up:
-	docker build -t customersupport-harness .
-	docker rm -f customersupport-harness 2>/dev/null || true
-	docker run -d \
-		--name customersupport-harness \
-		--env-file .env \
-		-v $(HOME)/.aws:/root/.aws:ro \
-		--restart unless-stopped \
-		customersupport-harness
-	@echo "Harness running. Logs: docker logs -f customersupport-harness"
+	docker compose up -d --build
+	@echo "Stack running. Logs: make logs"
 
 down:
-	docker stop customersupport-harness 2>/dev/null || true
-	docker rm customersupport-harness 2>/dev/null || true
-	@echo "Harness stopped."
+	docker compose down
+	@echo "Stack stopped."
 
 logs:
-	docker logs -f customersupport-harness
+	docker compose logs -f

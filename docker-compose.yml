@@ -4,4 +4,15 @@ services:
     env_file: .env
     volumes:
       - ~/.aws:/root/.aws:ro
+      - ./mcp_tools.json:/app/mcp_tools.json:ro
+    restart: unless-stopped
+    depends_on:
+      - mcp-filesystem
+
+  mcp-filesystem:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-filesystem
+    volumes:
+      - .:/workspace:ro
     restart: unless-stopped

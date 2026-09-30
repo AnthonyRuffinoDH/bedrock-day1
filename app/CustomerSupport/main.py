@@ -1,10 +1,17 @@
 from strands import Agent, tool
+from strands.types.tools import AgentTool, ToolUse, ToolSpec, ToolResult
+from strands.types._events import ToolResultEvent
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from starlette.websockets import WebSocketDisconnect
 from model.load import load_model
 from mcp_client.client import get_streamable_http_mcp_client, get_gateway_mcp_client
 from memory.session import get_channel_memory_session_manager
+import asyncio
 import logging
 import json
+import os
+import uuid
+from typing import Any
 from datetime import datetime, timezone
 
 app = BedrockAgentCoreApp()
@@ -331,6 +338,89 @@ async def invoke(payload, context):
         if "data" in event and isinstance(event["data"], str):
             yield event["data"]
 
+WS_TOOL_TIMEOUT = int(os.environ.get("WS_TOOL_TIMEOUT", "30"))
+
+
+class _WebSocketProxyTool(AgentTool):
+    """A tool that proxies calls over WebSocket to the harness for local MCP execution."""
+
+    def __init__(self, name: str, description: str, input_schema: dict, websocket):
+        super().__init__()
+        self._name = name
+        self._description = description
+        self._input_schema = input_schema
+        self._websocket = websocket
+
+    @property
+    def tool_name(self) -> str:
+        return self._name
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        return {
+            "name": self._name,
+            "description": self._description,
+            "inputSchema": {"json": self._input_schema},
+        }
+
+    @property
+    def tool_type(self) -> str:
+        return "function"
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any):
+        tool_use_id = tool_use.get("toolUseId", "unknown")
+        tool_input = tool_use.get("input", {})
+        call_id = str(uuid.uuid4())
+
+        log.info(f"[WS TOOL PROXY] Sending tool_call: {self._name} (id={call_id})")
+        try:
+            await self._websocket.send_json({
+                "type": "tool_call",
+                "tool_call_id": call_id,
+                "name": self._name,
+                "args": tool_input,
+            })
+            result_msg = await asyncio.wait_for(
+                self._websocket.receive_json(), timeout=WS_TOOL_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            log.warning(f"[WS TOOL PROXY] Timeout waiting for tool_result: {self._name} (id={call_id})")
+            yield ToolResultEvent({"toolUseId": tool_use_id, "status": "error", "content": [{"text": f"Error: tool execution timed out after {WS_TOOL_TIMEOUT}s"}]})
+            return
+        except WebSocketDisconnect:
+            log.warning(f"[WS TOOL PROXY] Client disconnected: {self._name} (id={call_id})")
+            yield ToolResultEvent({"toolUseId": tool_use_id, "status": "error", "content": [{"text": "Error: client disconnected during tool execution"}]})
+            return
+        except Exception as e:
+            log.error(f"[WS TOOL PROXY] Error proxying tool {self._name}: {e}")
+            yield ToolResultEvent({"toolUseId": tool_use_id, "status": "error", "content": [{"text": f"Error: {e}"}]})
+            return
+
+        if result_msg.get("type") != "tool_result" or result_msg.get("tool_call_id") != call_id:
+            log.warning(f"[WS TOOL PROXY] Unexpected message while awaiting tool_result: {result_msg}")
+            yield ToolResultEvent({"toolUseId": tool_use_id, "status": "error", "content": [{"text": "Error: unexpected response from harness"}]})
+            return
+
+        content = result_msg.get("content", "")
+        log.info(f"[WS TOOL PROXY] Received tool_result for {self._name} (id={call_id})")
+        yield ToolResultEvent({"toolUseId": tool_use_id, "status": "success", "content": [{"text": content}]})
+
+
+def _build_client_tool_wrappers(client_tools, websocket):
+    """Create AgentTool instances that proxy calls over the WebSocket."""
+    wrappers = []
+    client_tool_names = set()
+
+    for schema in client_tools:
+        tool_name = schema["name"]
+        tool_desc = schema.get("description", "")
+        input_schema = schema.get("input_schema", {"type": "object", "properties": {}})
+        client_tool_names.add(tool_name)
+        wrappers.append(_WebSocketProxyTool(tool_name, tool_desc, input_schema, websocket))
+
+    return wrappers, client_tool_names
+
+
 @app.websocket
 async def ws_invoke(websocket, context):
     await websocket.accept()
@@ -444,14 +534,40 @@ async def ws_invoke(websocket, context):
         log.info(f"[WS MODEL CALL] Invoking main LLM with prompt: '{prompt_input[:60]}...'")
         prompt_data = prompt_input
 
-    agent = get_or_create_agent(session_id, channel_id)
-    stream = agent.stream_async(prompt_data)
-    async for event in stream:
-        if "data" in event and isinstance(event["data"], str):
-            await websocket.send_json({"type": "text_delta", "content": event["data"]})
+    # Build tool set — merge cloud tools with any client tools from payload
+    client_tools_schemas = payload.get("client_tools", [])
+    extra_tools = []
+    if client_tools_schemas:
+        extra_tools, _ = _build_client_tool_wrappers(client_tools_schemas, websocket)
+        log.info(f"[WS TOOLS] Registered {len(extra_tools)} client tools: {[t.tool_name for t in extra_tools]}")
 
-    await websocket.send_json({"type": "done"})
-    await websocket.close()
+    cloud_tools = TOOL_PROFILES["primary"]()
+    all_tools = cloud_tools + extra_tools
+
+    try:
+        agent = Agent(
+            model=load_model(),
+            system_prompt=SYSTEM_PROMPT,
+            tools=all_tools,
+        )
+
+        stream = agent.stream_async(prompt_data)
+        async for event in stream:
+            if "data" in event and isinstance(event["data"], str):
+                await websocket.send_json({"type": "text_delta", "content": event["data"]})
+
+        await websocket.send_json({"type": "done"})
+    except Exception as e:
+        log.error(f"[WS ERROR] Agent invocation failed: {e}", exc_info=True)
+        try:
+            await websocket.send_json({"type": "error", "content": f"Agent error: {e}"})
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

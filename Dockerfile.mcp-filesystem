@@ -1,0 +1,7 @@
+FROM node:22-slim
+
+RUN npm install -g supergateway @modelcontextprotocol/server-filesystem
+
+EXPOSE 8000
+
+ENTRYPOINT ["supergateway", "--stdio", "npx @modelcontextprotocol/server-filesystem /workspace", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/mcp", "--port", "8000"]

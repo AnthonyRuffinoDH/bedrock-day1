@@ -1,0 +1,71 @@
+{
+  "servers": [
+    {
+      "name": "filesystem",
+      "transport": "http",
+      "url": "http://mcp-filesystem:8000/mcp",
+      "tools": [
+        {
+          "name": "read_file",
+          "description": "Read the complete contents of a file from the workspace. Only works within the allowed directory.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Path to the file to read (relative to or within the allowed directory)"
+              }
+            },
+            "required": ["path"]
+          }
+        },
+        {
+          "name": "list_directory",
+          "description": "List directory contents with [FILE] or [DIR] prefixes. Only works within the allowed directory.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Path to the directory to list"
+              }
+            },
+            "required": ["path"]
+          }
+        },
+        {
+          "name": "search_files",
+          "description": "Recursively search for files and directories matching a pattern. Returns full paths of all matches.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Starting directory for the search"
+              },
+              "pattern": {
+                "type": "string",
+                "description": "Search pattern (glob format)"
+              }
+            },
+            "required": ["path", "pattern"]
+          }
+        },
+        {
+          "name": "get_file_info",
+          "description": "Get metadata about a file or directory (size, timestamps, permissions).",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Path to the file or directory"
+              }
+            },
+            "required": ["path"]
+          }
+        }
+      ]
+    }
+  ]
+}

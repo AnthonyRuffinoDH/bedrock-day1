@@ -228,11 +228,23 @@ def invoke_agentcore_ws(payload, channel_id, thread_ts, include_user_id=False):
     )
 
     try:
+        if _client_tools:
+            schemas = [{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]} for t in _client_tools]
+            payload["client_tools"] = schemas
+            logger.info(f"[MCP INJECT] Injected {len(schemas)} client tool schemas into payload.")
+
         conn.send(json.dumps(payload))
 
         full_response = ""
         while True:
-            raw = conn.recv()
+            try:
+                raw = conn.recv()
+            except ws_client.WebSocketConnectionClosedException:
+                logger.error("[WS DISCONNECT] Connection closed unexpectedly during receive.")
+                if full_response:
+                    return full_response.strip()
+                return "Sorry, the connection to the server was lost. Please try again."
+
             if not raw:
                 break
             msg = json.loads(raw)
@@ -242,17 +254,200 @@ def invoke_agentcore_ws(payload, channel_id, thread_ts, include_user_id=False):
                 full_response += msg.get("content", "")
             elif msg_type == "done":
                 break
+            elif msg_type == "tool_call":
+                tool_call_id = msg.get("tool_call_id")
+                tool_name = msg.get("name")
+                tool_args = msg.get("args", {})
+                logger.info(f"[WS TOOL_CALL] Received tool_call: {tool_name} (id={tool_call_id})")
+                content = _execute_mcp_tool(tool_name, tool_args)
+                logger.info(f"[WS TOOL_RESULT] Returning result for {tool_name} (id={tool_call_id}): {content[:80]}...")
+                try:
+                    conn.send(json.dumps({
+                        "type": "tool_result",
+                        "tool_call_id": tool_call_id,
+                        "content": content,
+                    }))
+                except ws_client.WebSocketConnectionClosedException:
+                    logger.error("[WS DISCONNECT] Connection closed while sending tool_result.")
+                    return "Sorry, the connection to the server was lost during tool execution. Please try again."
             elif msg_type == "error":
                 logger.error(f"[WS ERROR] AgentCore returned error: {msg.get('content')}")
                 return f"Sorry, something went wrong: {msg.get('content', 'unknown error')}"
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     logger.info(f"[WS RESPONSE] Received {len(full_response)} bytes from AgentCore.")
-    return full_response.strip()
+    result = full_response.strip()
+    if not result:
+        logger.warning("[WS RESPONSE] Empty response from AgentCore — possible agent error.")
+        return "Sorry, I wasn't able to generate a response. Please try again."
+    return result
 
 
 USE_WEBSOCKET = os.getenv("USE_WEBSOCKET", "false").lower() in ("true", "1", "yes")
+MCP_TOOL_TIMEOUT = int(os.getenv("MCP_TOOL_TIMEOUT", "30"))
+
+# --- MCP TOOL CONFIG ---
+
+_client_tools = []
+
+def _load_mcp_tools():
+    """Load local MCP tool schemas from mcp_tools.json. Returns list of tool dicts."""
+    config_path = os.path.join(os.path.dirname(__file__) or ".", "mcp_tools.json")
+    if not os.path.exists(config_path):
+        logger.info("[MCP CONFIG] No mcp_tools.json found. Starting without client tools.")
+        return []
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        servers = config.get("servers", [])
+        tools = []
+        for server in servers:
+            server_name = server.get("name", "unknown")
+            for t in server.get("tools", []):
+                t["_server"] = server_name
+                t["_command"] = server.get("command")
+                t["_transport"] = server.get("transport", "stdio")
+                t["_url"] = server.get("url")
+                tools.append(t)
+        logger.info(f"[MCP CONFIG] Loaded {len(tools)} client tools from {len(servers)} servers.")
+        return tools
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.error(f"[MCP CONFIG] Failed to parse mcp_tools.json: {e}. Starting without client tools.")
+        return []
+    except Exception as e:
+        logger.error(f"[MCP CONFIG] Unexpected error loading mcp_tools.json: {e}. Starting without client tools.")
+        return []
+
+_client_tools = _load_mcp_tools()
+
+# Build lookup: tool_name -> server config for routing
+_tool_to_server = {}
+for _t in _client_tools:
+    _tool_to_server[_t["name"]] = {
+        "name": _t.get("_server"),
+        "command": _t.get("_command"),
+        "transport": _t.get("_transport", "stdio"),
+        "url": _t.get("_url"),
+    }
+
+
+def _execute_mcp_tool(tool_name, args):
+    """Execute a tool call against its configured local MCP server via stdio or HTTP."""
+    server = _tool_to_server.get(tool_name)
+    if not server:
+        return f"Error: no MCP server configured for tool '{tool_name}'"
+
+    transport = server.get("transport", "stdio")
+    logger.info(f"[MCP EXEC] Calling tool '{tool_name}' via {server['name']} (transport={transport})")
+
+    if transport == "http":
+        return _execute_mcp_tool_http(tool_name, args, server)
+    return _execute_mcp_tool_stdio(tool_name, args, server)
+
+
+def _execute_mcp_tool_stdio(tool_name, args, server):
+    """Execute a tool call via stdio subprocess JSON-RPC."""
+    import subprocess
+
+    if not server.get("command"):
+        return f"Error: no command configured for stdio server '{server['name']}'"
+
+    rpc_request = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": args},
+    })
+
+    try:
+        result = subprocess.run(
+            server["command"],
+            input=rpc_request,
+            capture_output=True,
+            text=True,
+            timeout=MCP_TOOL_TIMEOUT,
+        )
+        if result.returncode != 0:
+            logger.warning(f"[MCP EXEC] Server {server['name']} exited with code {result.returncode}: {result.stderr[:200]}")
+            return f"Error: MCP server exited with code {result.returncode}: {result.stderr[:200]}"
+
+        return _parse_rpc_response(result.stdout)
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"[MCP EXEC] Tool '{tool_name}' timed out after {MCP_TOOL_TIMEOUT}s")
+        return f"Error: tool execution timed out after {MCP_TOOL_TIMEOUT}s"
+    except FileNotFoundError:
+        logger.error(f"[MCP EXEC] Command not found: {server['command']}")
+        return f"Error: MCP server command not found: {server['command'][0]}"
+    except Exception as e:
+        logger.error(f"[MCP EXEC] Unexpected error executing tool '{tool_name}': {e}")
+        return f"Error: {e}"
+
+
+def _execute_mcp_tool_http(tool_name, args, server):
+    """Execute a tool call via MCP Streamable HTTP (POST JSON-RPC to server URL)."""
+    url = server.get("url")
+    if not url:
+        return f"Error: no url configured for HTTP server '{server['name']}'"
+
+    rpc_request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": args},
+    }
+
+    try:
+        resp = requests.post(
+            url,
+            json=rpc_request,
+            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+            timeout=MCP_TOOL_TIMEOUT,
+        )
+        resp.raise_for_status()
+
+        content_type = resp.headers.get("Content-Type", "")
+        if "text/event-stream" in content_type:
+            return _parse_sse_response(resp.text)
+
+        return _parse_rpc_response(resp.text)
+
+    except requests.Timeout:
+        logger.warning(f"[MCP EXEC] HTTP tool '{tool_name}' timed out after {MCP_TOOL_TIMEOUT}s")
+        return f"Error: tool execution timed out after {MCP_TOOL_TIMEOUT}s"
+    except requests.RequestException as e:
+        logger.error(f"[MCP EXEC] HTTP error calling tool '{tool_name}': {e}")
+        return f"Error: {e}"
+    except Exception as e:
+        logger.error(f"[MCP EXEC] Unexpected error executing tool '{tool_name}': {e}")
+        return f"Error: {e}"
+
+
+def _parse_rpc_response(raw):
+    """Parse a JSON-RPC response and extract MCP content."""
+    try:
+        rpc_response = json.loads(raw)
+        if "error" in rpc_response:
+            return f"Error: {rpc_response['error'].get('message', 'unknown MCP error')}"
+        rpc_result = rpc_response.get("result", {})
+        content_parts = rpc_result.get("content", [])
+        return "\n".join(p.get("text", str(p)) for p in content_parts) if content_parts else str(rpc_result)
+    except json.JSONDecodeError:
+        return raw.strip() or "Error: empty response from MCP server"
+
+
+def _parse_sse_response(raw):
+    """Parse an SSE stream for the JSON-RPC response event."""
+    for line in raw.split("\n"):
+        if line.startswith("data: "):
+            data = line[6:].strip()
+            if data:
+                return _parse_rpc_response(data)
+    return "Error: no data event in SSE response"
 
 
 def invoke_agentcore_auto(payload, channel_id, thread_ts, include_user_id=False):
