@@ -7,9 +7,11 @@ from model.load import load_model
 from mcp_client.client import get_streamable_http_mcp_client, get_gateway_mcp_client
 from memory.session import get_channel_memory_session_manager
 import asyncio
+import functools
 import logging
 import json
 import os
+import pathlib
 import uuid
 from typing import Any
 from datetime import datetime, timezone
@@ -21,6 +23,22 @@ log.setLevel(logging.INFO)
 # MCP clients: Exa AI (web search) + AgentCore Gateway (Lambda tools)
 mcp_clients = [get_streamable_http_mcp_client(), get_gateway_mcp_client()]
 
+# --- Tool Namespacing ---
+# Agent-side and client-side tools are registered in separate namespaces so
+# both sides can define tools with identical base names without collision.
+AGENT_NS = "agent"
+CLIENT_NS = "client"
+
+
+def _ns_tool(namespace, func):
+    """Wrap a plain function as a Strands @tool with a namespaced name."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+    wrapper.__name__ = f"{namespace}__{func.__name__}"
+    return tool(wrapper)
+
+
 SYSTEM_PROMPT = """You are a helpful and professional customer support assistant deployed as a Slack bot.
 
 <conversational_context>
@@ -29,8 +47,8 @@ Your primary source of conversational context is the recent thread messages incl
 
 <memory_tools>
 You have two optional tools for persistent channel memory:
-- channel_memory_store: Save information that will be useful in future conversations in this channel. Use only for durably valuable knowledge (e.g., recurring issues, team preferences, important decisions).
-- channel_memory_recall: Query previously stored channel knowledge when prior context would materially improve your response.
+- agent__channel_memory_store: Save information that will be useful in future conversations in this channel. Use only for durably valuable knowledge (e.g., recurring issues, team preferences, important decisions).
+- agent__channel_memory_recall: Query previously stored channel knowledge when prior context would materially improve your response.
 
 Guidelines:
 - Do NOT store routine support interactions. Only store information likely to remain useful beyond the current thread.
@@ -53,47 +71,81 @@ Your role is to:
 - Provide accurate information using the tools available to you.
 - Be friendly, patient, and understanding with customers.
 - Always use tools to get accurate, up-to-date information rather than guessing.
+- You can explore files and directories within your allowed directory using the filesystem tools (agent__read_file, agent__list_directory, agent__search_files, agent__get_file_info).
 </support_guidelines>"""
 
-# --- Customer Support Tools ---
+# --- Filesystem Tools ---
 
-RETURN_POLICIES = {
-    "electronics": {"window": "30 days", "condition": "Original packaging required, must be unused or defective", "refund": "Full refund to original payment method"},
-    "accessories": {"window": "14 days", "condition": "Must be in original packaging, unused", "refund": "Store credit or exchange"},
-    "audio": {"window": "30 days", "condition": "Defective items only after 15 days", "refund": "Full refund within 15 days, replacement after"},
-}
+_FS_ALLOWED_DIR = os.path.realpath(os.environ.get("FS_ALLOWED_DIR", os.getcwd()))
 
-PRODUCTS = {
-    "PROD-001": {"name": "Wireless Headphones", "price": 79.99, "category": "audio", "description": "Noise-cancelling Bluetooth headphones with 30h battery life", "warranty_months": 12},
-    "PROD-002": {"name": "Smart Watch", "price": 249.99, "category": "electronics", "description": "Fitness tracker with heart rate monitor, GPS, and 5-day battery", "warranty_months": 24},
-    "PROD-003": {"name": "Laptop Stand", "price": 39.99, "category": "accessories", "description": "Adjustable aluminum laptop stand for ergonomic desk setup", "warranty_months": 6},
-    "PROD-004": {"name": "USB-C Hub", "price": 54.99, "category": "accessories", "description": "7-in-1 USB-C hub with HDMI, USB-A, SD card reader, and ethernet", "warranty_months": 12},
-    "PROD-005": {"name": "Mechanical Keyboard", "price": 129.99, "category": "electronics", "description": "RGB mechanical keyboard with Cherry MX switches", "warranty_months": 24},
-}
 
-@tool
-def get_return_policy(product_category: str) -> str:
-    """Get return policy information for a specific product category."""
-    log.info(f"[TOOL EXECUTION] get_return_policy called with category: '{product_category}'")
-    category = product_category.lower()
-    if category in RETURN_POLICIES:
-        policy = RETURN_POLICIES[category]
-        return f"Return policy for {category}: Window: {policy['window']}, Condition: {policy['condition']}, Refund: {policy['refund']}"
-    return f"No specific return policy found for '{product_category}'. Please contact support for details."
+def _resolve_safe_path(requested_path: str) -> tuple[str, str | None]:
+    """Resolve a path and validate it is within the allowed directory."""
+    resolved = os.path.realpath(requested_path)
+    try:
+        common = os.path.commonpath([resolved, _FS_ALLOWED_DIR])
+    except ValueError:
+        return resolved, f"Path is not permitted: {requested_path}"
+    if common != _FS_ALLOWED_DIR:
+        return resolved, f"Path is not permitted: {requested_path}"
+    return resolved, None
 
-@tool
-def get_product_info(query: str) -> str:
-    """Search for product information by name, ID, or keyword."""
-    log.info(f"[TOOL EXECUTION] get_product_info called with query: '{query}'")
-    query_lower = query.lower()
-    if query.upper() in PRODUCTS:
-        p = PRODUCTS[query.upper()]
-        return f"{p['name']} ({query.upper()}): ${p['price']}, Category: {p['category']}, {p['description']}, Warranty: {p['warranty_months']} months"
-    results = [f"{pid}: {p['name']} - ${p['price']} - {p['description']}" for pid, p in PRODUCTS.items()
-               if query_lower in p['name'].lower() or query_lower in p['description'].lower() or query_lower in p['category'].lower()]
-    if results:
-        return "Found products:\n" + "\n".join(results)
-    return f"No products found matching '{query}'."
+
+def read_file(path: str) -> str:
+    """Read and return the contents of a file. The path must be within the allowed directory."""
+    log.info(f"[TOOL EXECUTION] read_file called with path: '{path}'")
+    resolved, err = _resolve_safe_path(path)
+    if err:
+        return err
+    if not os.path.isfile(resolved):
+        return f"File not found: {path}"
+    with open(resolved, "r") as f:
+        return f.read()
+
+
+def list_directory(path: str) -> str:
+    """List the contents of a directory, showing [FILE] or [DIR] prefix for each entry."""
+    log.info(f"[TOOL EXECUTION] list_directory called with path: '{path}'")
+    resolved, err = _resolve_safe_path(path)
+    if err:
+        return err
+    if not os.path.isdir(resolved):
+        return f"Directory not found: {path}"
+    entries = []
+    for entry in sorted(os.listdir(resolved)):
+        full = os.path.join(resolved, entry)
+        prefix = "[DIR]" if os.path.isdir(full) else "[FILE]"
+        entries.append(f"{prefix} {entry}")
+    return "\n".join(entries) if entries else "Directory is empty."
+
+
+def search_files(path: str, pattern: str) -> str:
+    """Recursively search for files matching a glob pattern within a directory."""
+    log.info(f"[TOOL EXECUTION] search_files called with path: '{path}', pattern: '{pattern}'")
+    resolved, err = _resolve_safe_path(path)
+    if err:
+        return err
+    if not os.path.isdir(resolved):
+        return f"Directory not found: {path}"
+    matches = [str(p) for p in pathlib.Path(resolved).rglob(pattern)
+               if _resolve_safe_path(str(p))[1] is None]
+    if matches:
+        return "\n".join(sorted(matches))
+    return f"No files found matching '{pattern}' in {path}."
+
+
+def get_file_info(path: str) -> str:
+    """Get metadata about a file or directory: size, modification time, and type."""
+    log.info(f"[TOOL EXECUTION] get_file_info called with path: '{path}'")
+    resolved, err = _resolve_safe_path(path)
+    if err:
+        return err
+    if not os.path.exists(resolved):
+        return f"Path not found: {path}"
+    stat = os.stat(resolved)
+    file_type = "directory" if os.path.isdir(resolved) else "file"
+    mod_time = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return f"Type: {file_type}, Size: {stat.st_size} bytes, Modified: {mod_time}"
 
 MEMORY_AGENT_PROMPT = """You are a memory storage and retrieval agent. Process the request and respond concisely.
 
@@ -114,7 +166,6 @@ If nothing in the channel history is relevant, return exactly: NO_RELEVANT_HISTO
 NO_RELEVANT_HISTORY = "NO_RELEVANT_HISTORY"
 
 
-@tool
 def channel_memory_store(content: str) -> str:
     """Store durable information scoped to the current Slack channel for future conversations. When storing updates or resolutions, include the original topic and prior status so the update supersedes older entries in future searches."""
     log.info(f"[MEMORY STORE] Storing channel memory: '{content[:60]}...'")
@@ -138,7 +189,6 @@ def channel_memory_store(content: str) -> str:
         return "Failed to store in channel memory. Continuing without persistence."
 
 
-@tool
 def channel_memory_recall(query: str) -> str:
     """Query previously stored channel memory when prior knowledge may help answer a request."""
     log.info(f"[MEMORY RECALL] Querying channel memory: '{query[:60]}...'")
@@ -194,12 +244,12 @@ def _get_current_request_context():
     raise RuntimeError("No active request context")
 
 
-_domain_tools = [get_return_policy, get_product_info]
+_filesystem_tools = [_ns_tool(AGENT_NS, f) for f in [read_file, list_directory, search_files, get_file_info]]
 _mcp_tools = [c for c in mcp_clients if c]
-_memory_tools = [channel_memory_store, channel_memory_recall]
+_memory_tools = [_ns_tool(AGENT_NS, f) for f in [channel_memory_store, channel_memory_recall]]
 
 TOOL_PROFILES = {
-    "primary": lambda: _domain_tools + _mcp_tools + _memory_tools,
+    "primary": lambda: _filesystem_tools + _mcp_tools + _memory_tools,
     "memory": lambda: [],
 }
 
@@ -342,11 +392,13 @@ WS_TOOL_TIMEOUT = int(os.environ.get("WS_TOOL_TIMEOUT", "30"))
 
 
 class _WebSocketProxyTool(AgentTool):
-    """A tool that proxies calls over WebSocket to the harness for local MCP execution."""
+    """A tool that proxies calls over WebSocket to the harness for local MCP execution.
+    Registered under the CLIENT_NS namespace; uses the original name on the wire."""
 
     def __init__(self, name: str, description: str, input_schema: dict, websocket):
         super().__init__()
-        self._name = name
+        self._original_name = name
+        self._name = f"{CLIENT_NS}__{name}"
         self._description = description
         self._input_schema = input_schema
         self._websocket = websocket
@@ -372,12 +424,12 @@ class _WebSocketProxyTool(AgentTool):
         tool_input = tool_use.get("input", {})
         call_id = str(uuid.uuid4())
 
-        log.info(f"[WS TOOL PROXY] Sending tool_call: {self._name} (id={call_id})")
+        log.info(f"[WS TOOL PROXY] Sending tool_call: {self._original_name} (id={call_id})")
         try:
             await self._websocket.send_json({
                 "type": "tool_call",
                 "tool_call_id": call_id,
-                "name": self._name,
+                "name": self._original_name,
                 "args": tool_input,
             })
             result_msg = await asyncio.wait_for(
@@ -534,7 +586,7 @@ async def ws_invoke(websocket, context):
         log.info(f"[WS MODEL CALL] Invoking main LLM with prompt: '{prompt_input[:60]}...'")
         prompt_data = prompt_input
 
-    # Build tool set — merge cloud tools with any client tools from payload
+    # Build tool set — merge agent-namespaced cloud tools with client-namespaced harness tools
     client_tools_schemas = payload.get("client_tools", [])
     extra_tools = []
     if client_tools_schemas:
