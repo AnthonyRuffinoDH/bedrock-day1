@@ -1,3 +1,12 @@
+"""main.py — AgentCore entrypoint for Herocore.
+
+WebSocket proxy tool infrastructure (_WebSocketProxyTool,
+_build_client_tool_wrappers) now lives in herocore_bridge.agent_proxy.
+This file imports and uses those classes directly.
+
+The herocore_bridge package must be installed in the AgentCore container image.
+See packages/herocore-bridge/README.md for installation options.
+"""
 from strands import Agent, tool
 from strands.types.tools import AgentTool, ToolUse, ToolSpec, ToolResult
 from strands.types._events import ToolResultEvent
@@ -6,6 +15,10 @@ from starlette.websockets import WebSocketDisconnect
 from model.load import load_model
 from mcp_client.client import get_streamable_http_mcp_client, get_gateway_mcp_client
 from memory.session import get_channel_memory_session_manager
+
+# Import the bridge — proxy tool layer now lives in the library
+from herocore_bridge.agent_proxy import build_client_tool_wrappers
+
 import asyncio
 import functools
 import logging
@@ -68,7 +81,22 @@ Memory tools (persistent channel knowledge):
 
 <client_tools>
 You should also expect additional tools provided by the client/harness via MCP. These client-side tools (prefixed with client__) enable capabilities like code exploration, file modification, testing, and other development operations. When client tools are present, use them to carry out implementation work. When absent, operate with your default agent-side tools.
+
+Client-side tools fall into two categories:
+- Local filesystem tools (read_file, list_directory, etc.): Read-only access to the harness's local workspace. Fast, but reflects the local checkout — not necessarily the authoritative repository state.
+- GitHub tools (get_file_contents, create_branch, create_or_update_file, create_pull_request, etc.): Read and write access to the authoritative GitHub repository. Use these for the self-improvement workflow.
 </client_tools>
+
+<github_workflow>
+When asked to make a code change, follow this workflow:
+1. EXPLORE: Read relevant files using agent-side filesystem tools or GitHub get_file_contents to understand current state.
+2. BRANCH: Create a dedicated branch via client__create_branch (e.g., herocore/description-of-change).
+3. CHANGE: Make the required changes via client__create_or_update_file. For updates to existing files, first get the file's SHA via client__get_file_contents.
+4. PR: Open a pull request via client__create_pull_request explaining what changed and why.
+5. STOP: Return the PR URL and stop. Do NOT merge the PR or trigger any deployment.
+
+You MUST NOT merge pull requests. You MUST NOT trigger deployments or restarts. A human reviews and merges your work.
+</github_workflow>
 
 <operating_procedure>
 When a user asks you to improve or modify a feature, follow this loop:
@@ -94,9 +122,9 @@ IMPORTANT — you MUST follow these rules when using recalled memory:
 - If only one entry is returned about an issue, explicitly note that you cannot confirm whether it is still current.
 </memory_reconciliation>
 
-<future_context>
-Your immediate evolutionary goal is to integrate a GitHub MCP tool so you can turn your proposals into actual Pull Requests. Keep this in mind as you design your upgrades.
-</future_context>"""
+<current_capabilities>
+You have GitHub MCP integration: you can inspect repositories, create branches, commit file changes, and open pull requests. Your self-improvement boundary ends at opening a PR — merging and deployment are human-controlled. Your next evolutionary goals are CI/CD awareness and post-merge validation.
+</current_capabilities>"""
 
 # --- Filesystem Tools ---
 
@@ -117,7 +145,7 @@ def _resolve_safe_path(requested_path: str) -> tuple[str, str | None]:
 
 def read_file(path: str) -> str:
     """Read and return the contents of a file. The path must be within the allowed directory."""
-    log.info(f"[TOOL EXECUTION] read_file called with path: '{path}'")
+    log.info("[TOOL EXECUTION] read_file called with path: '%s'", path)
     resolved, err = _resolve_safe_path(path)
     if err:
         return err
@@ -129,7 +157,7 @@ def read_file(path: str) -> str:
 
 def list_directory(path: str) -> str:
     """List the contents of a directory, showing [FILE] or [DIR] prefix for each entry."""
-    log.info(f"[TOOL EXECUTION] list_directory called with path: '{path}'")
+    log.info("[TOOL EXECUTION] list_directory called with path: '%s'", path)
     resolved, err = _resolve_safe_path(path)
     if err:
         return err
@@ -145,7 +173,7 @@ def list_directory(path: str) -> str:
 
 def search_files(path: str, pattern: str) -> str:
     """Recursively search for files matching a glob pattern within a directory."""
-    log.info(f"[TOOL EXECUTION] search_files called with path: '{path}', pattern: '{pattern}'")
+    log.info("[TOOL EXECUTION] search_files called with path: '%s', pattern: '%s'", path, pattern)
     resolved, err = _resolve_safe_path(path)
     if err:
         return err
@@ -160,7 +188,7 @@ def search_files(path: str, pattern: str) -> str:
 
 def get_file_info(path: str) -> str:
     """Get metadata about a file or directory: size, modification time, and type."""
-    log.info(f"[TOOL EXECUTION] get_file_info called with path: '{path}'")
+    log.info("[TOOL EXECUTION] get_file_info called with path: '%s'", path)
     resolved, err = _resolve_safe_path(path)
     if err:
         return err
@@ -188,7 +216,7 @@ relevant to the thread context, say so briefly."""
 
 def http_head(url: str, headers: dict | None = None) -> str:
     """Perform an HTTP HEAD request and return the response status code and headers."""
-    log.info(f"[TOOL EXECUTION] http_head called with url: '{url}'")
+    log.info("[TOOL EXECUTION] http_head called with url: '%s'", url)
     try:
         with httpx.Client(timeout=HTTP_TOOL_TIMEOUT) as client:
             resp = client.head(url, headers=headers or {})
@@ -200,7 +228,7 @@ def http_head(url: str, headers: dict | None = None) -> str:
 
 def http_get(url: str, headers: dict | None = None) -> str:
     """Fetch a URL via HTTP GET and return content extracted by a nested agent, filtered for relevance to the current conversation."""
-    log.info(f"[TOOL EXECUTION] http_get called with url: '{url}'")
+    log.info("[TOOL EXECUTION] http_get called with url: '%s'", url)
     try:
         with httpx.Client(timeout=HTTP_TOOL_TIMEOUT) as client:
             resp = client.get(url, headers=headers or {})
@@ -235,7 +263,7 @@ def http_get(url: str, headers: dict | None = None) -> str:
         result = extraction_agent(extraction_input)
         return str(result)
     except Exception as e:
-        log.warning(f"[HTTP GET] Extraction agent failed: {e}")
+        log.warning("[HTTP GET] Extraction agent failed: %s", e)
         if truncated:
             return f"[Truncated to {HTTP_MAX_RESPONSE_SIZE} bytes]\n{body}"
         return body
@@ -262,7 +290,7 @@ NO_RELEVANT_HISTORY = "NO_RELEVANT_HISTORY"
 
 def channel_memory_store(content: str) -> str:
     """Store durable information scoped to the current Slack channel for future conversations. When storing updates or resolutions, include the original topic and prior status so the update supersedes older entries in future searches."""
-    log.info(f"[MEMORY STORE] Storing channel memory: '{content[:60]}...'")
+    log.info("[MEMORY STORE] Storing channel memory: '%s...'", content[:60])
     try:
         ctx = _get_current_request_context()
         sm = get_channel_memory_session_manager(ctx["channel_id"], ctx["session_id"])
@@ -279,13 +307,13 @@ def channel_memory_store(content: str) -> str:
         result = memory_agent(f"Remember this for future conversations in this channel: {stamped_content}")
         return f"Stored in channel memory: {stamped_content}"
     except Exception as e:
-        log.warning(f"[MEMORY STORE] Failed: {e}")
+        log.warning("[MEMORY STORE] Failed: %s", e)
         return "Failed to store in channel memory. Continuing without persistence."
 
 
 def channel_memory_recall(query: str) -> str:
     """Query previously stored channel memory when prior knowledge may help answer a request."""
-    log.info(f"[MEMORY RECALL] Querying channel memory: '{query[:60]}...'")
+    log.info("[MEMORY RECALL] Querying channel memory: '%s...'", query[:60])
     try:
         ctx = _get_current_request_context()
         sm = get_channel_memory_session_manager(ctx["channel_id"], ctx["session_id"])
@@ -300,13 +328,13 @@ def channel_memory_recall(query: str) -> str:
         result = memory_agent(f"What do you know about: {query}")
         return str(result)
     except Exception as e:
-        log.warning(f"[MEMORY RECALL] Failed: {e}")
+        log.warning("[MEMORY RECALL] Failed: %s", e)
         return "No relevant channel memory found."
 
 
 def pre_recall_channel_memory(prompt, channel_id, session_id):
     """Pre-recall channel memory for the first message in a thread. Returns relevant facts or None."""
-    log.info(f"[PRE-RECALL] Querying channel memory for new session: '{prompt[:60]}...'")
+    log.info("[PRE-RECALL] Querying channel memory for new session: '%s...'", prompt[:60])
     try:
         sm = get_channel_memory_session_manager(channel_id, session_id)
         if not sm:
@@ -322,10 +350,10 @@ def pre_recall_channel_memory(prompt, channel_id, session_id):
         if NO_RELEVANT_HISTORY in result:
             log.info("[PRE-RECALL] No relevant channel history found.")
             return None
-        log.info(f"[PRE-RECALL] Relevant history found: '{result[:80]}...'")
+        log.info("[PRE-RECALL] Relevant history found: '%s...'", result[:80])
         return result
     except Exception as e:
-        log.warning(f"[PRE-RECALL] Failed: {e}")
+        log.warning("[PRE-RECALL] Failed: %s", e)
         return None
 
 
@@ -359,34 +387,29 @@ def get_or_create_agent(session_id, channel_id):
 
     if session_id not in _agents:
         log.info(
-            f"[NEW INSTANCE] Hydrating session={session_id}, channel={channel_id}"
+            "[NEW INSTANCE] Hydrating session=%s, channel=%s",
+            session_id, channel_id,
         )
-
         agent = Agent(
             model=load_model(),
             system_prompt=SYSTEM_PROMPT,
             tools=TOOL_PROFILES["primary"](),
         )
-
         _agents[session_id] = agent
     else:
-        log.info(
-            f"[WARM INSTANCE] Reusing agent for session={session_id}"
-        )
+        log.info("[WARM INSTANCE] Reusing agent for session=%s", session_id)
 
     return _agents[session_id]
 
 @app.entrypoint
 async def invoke(payload, context):
-    log.info(f"[AGENTCORE INVOKE] Received payload keys: {list(payload.keys())}")
+    log.info("[AGENTCORE INVOKE] Received payload keys: %s", list(payload.keys()))
     log.info(
-        "[SESSION DEBUG] "
-        f"context.session_id={context.session_id!r} | "
-        f"payload.sessionId={payload.get('sessionId')!r}"
+        "[SESSION DEBUG] context.session_id=%r | payload.sessionId=%r",
+        context.session_id, payload.get("sessionId"),
     )
 
     session_id = context.session_id
-
     if not session_id:
         raise ValueError("session_id is required.")
 
@@ -458,7 +481,7 @@ async def invoke(payload, context):
     global _active_session_id
     _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id, "thread_precontext": context_block}
     _active_session_id = session_id
-    log.info(f"[REQUEST CONTEXT] Set _request_context for session={session_id}: channel={channel_id}")
+    log.info("[REQUEST CONTEXT] Set _request_context for session=%s: channel=%s", session_id, channel_id)
 
     is_new_session = session_id not in _agents
     if is_new_session and channel_id:
@@ -474,7 +497,7 @@ async def invoke(payload, context):
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
         ]
     else:
-        log.info(f"[MODEL CALL] Invoking main LLM with prompt: '{prompt_input[:60]}...'")
+        log.info("[MODEL CALL] Invoking main LLM with prompt: '%s...'", prompt_input[:60])
         prompt_data = prompt_input
 
     agent = get_or_create_agent(session_id, channel_id)
@@ -482,90 +505,6 @@ async def invoke(payload, context):
     async for event in stream:
         if "data" in event and isinstance(event["data"], str):
             yield event["data"]
-
-WS_TOOL_TIMEOUT = int(os.environ.get("WS_TOOL_TIMEOUT", "30"))
-
-
-class _WebSocketProxyTool(AgentTool):
-    """A tool that proxies calls over WebSocket to the harness for local MCP execution.
-    Registered under the CLIENT_NS namespace; uses the original name on the wire."""
-
-    def __init__(self, name: str, description: str, input_schema: dict, websocket):
-        super().__init__()
-        self._original_name = name
-        self._name = f"{CLIENT_NS}__{name}"
-        self._description = description
-        self._input_schema = input_schema
-        self._websocket = websocket
-
-    @property
-    def tool_name(self) -> str:
-        return self._name
-
-    @property
-    def tool_spec(self) -> ToolSpec:
-        return {
-            "name": self._name,
-            "description": self._description,
-            "inputSchema": {"json": self._input_schema},
-        }
-
-    @property
-    def tool_type(self) -> str:
-        return "function"
-
-    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any):
-        tool_use_id = tool_use.get("toolUseId", "unknown")
-        tool_input = tool_use.get("input", {})
-        call_id = str(uuid.uuid4())
-
-        log.info(f"[WS TOOL PROXY] Sending tool_call: {self._original_name} (id={call_id})")
-        try:
-            await self._websocket.send_json({
-                "type": "tool_call",
-                "tool_call_id": call_id,
-                "name": self._original_name,
-                "args": tool_input,
-            })
-            result_msg = await asyncio.wait_for(
-                self._websocket.receive_json(), timeout=WS_TOOL_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            log.warning(f"[WS TOOL PROXY] Timeout waiting for tool_result: {self._name} (id={call_id})")
-            yield ToolResultEvent({"toolUseId": tool_use_id, "status": "error", "content": [{"text": f"Error: tool execution timed out after {WS_TOOL_TIMEOUT}s"}]})
-            return
-        except WebSocketDisconnect:
-            log.warning(f"[WS TOOL PROXY] Client disconnected: {self._name} (id={call_id})")
-            yield ToolResultEvent({"toolUseId": tool_use_id, "status": "error", "content": [{"text": "Error: client disconnected during tool execution"}]})
-            return
-        except Exception as e:
-            log.error(f"[WS TOOL PROXY] Error proxying tool {self._name}: {e}")
-            yield ToolResultEvent({"toolUseId": tool_use_id, "status": "error", "content": [{"text": f"Error: {e}"}]})
-            return
-
-        if result_msg.get("type") != "tool_result" or result_msg.get("tool_call_id") != call_id:
-            log.warning(f"[WS TOOL PROXY] Unexpected message while awaiting tool_result: {result_msg}")
-            yield ToolResultEvent({"toolUseId": tool_use_id, "status": "error", "content": [{"text": "Error: unexpected response from harness"}]})
-            return
-
-        content = result_msg.get("content", "")
-        log.info(f"[WS TOOL PROXY] Received tool_result for {self._name} (id={call_id})")
-        yield ToolResultEvent({"toolUseId": tool_use_id, "status": "success", "content": [{"text": content}]})
-
-
-def _build_client_tool_wrappers(client_tools, websocket):
-    """Create AgentTool instances that proxy calls over the WebSocket."""
-    wrappers = []
-    client_tool_names = set()
-
-    for schema in client_tools:
-        tool_name = schema["name"]
-        tool_desc = schema.get("description", "")
-        input_schema = schema.get("input_schema", {"type": "object", "properties": {}})
-        client_tool_names.add(tool_name)
-        wrappers.append(_WebSocketProxyTool(tool_name, tool_desc, input_schema, websocket))
-
-    return wrappers, client_tool_names
 
 
 @app.websocket
@@ -580,7 +519,7 @@ async def ws_invoke(websocket, context):
         await websocket.close()
         return
 
-    log.info(f"[WS INVOKE] Received payload keys: {list(payload.keys())}")
+    log.info("[WS INVOKE] Received payload keys: %s", list(payload.keys()))
 
     session_id = context.session_id
     if not session_id:
@@ -662,7 +601,7 @@ async def ws_invoke(websocket, context):
     global _active_session_id
     _request_context[session_id] = {"channel_id": channel_id, "session_id": session_id, "thread_precontext": context_block}
     _active_session_id = session_id
-    log.info(f"[WS REQUEST CONTEXT] Set _request_context for session={session_id}: channel={channel_id}")
+    log.info("[WS REQUEST CONTEXT] Set _request_context for session=%s: channel=%s", session_id, channel_id)
 
     is_new_session = session_id not in _agents
     if is_new_session and channel_id:
@@ -678,15 +617,19 @@ async def ws_invoke(websocket, context):
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
         ]
     else:
-        log.info(f"[WS MODEL CALL] Invoking main LLM with prompt: '{prompt_input[:60]}...'")
+        log.info("[WS MODEL CALL] Invoking main LLM with prompt: '%s...'", prompt_input[:60])
         prompt_data = prompt_input
 
-    # Build tool set — merge agent-namespaced cloud tools with client-namespaced harness tools
+    # Build tool set — merge agent-namespaced cloud tools with client-namespaced harness proxy tools
+    # Proxy tool layer is now provided by herocore_bridge.agent_proxy
     client_tools_schemas = payload.get("client_tools", [])
     extra_tools = []
     if client_tools_schemas:
-        extra_tools, _ = _build_client_tool_wrappers(client_tools_schemas, websocket)
-        log.info(f"[WS TOOLS] Registered {len(extra_tools)} client tools: {[t.tool_name for t in extra_tools]}")
+        extra_tools, _ = build_client_tool_wrappers(client_tools_schemas, websocket)
+        log.info(
+            "[WS TOOLS] Registered %d client tools: %s",
+            len(extra_tools), [t.tool_name for t in extra_tools],
+        )
 
     cloud_tools = TOOL_PROFILES["primary"]()
     all_tools = cloud_tools + extra_tools
@@ -705,7 +648,7 @@ async def ws_invoke(websocket, context):
 
         await websocket.send_json({"type": "done"})
     except Exception as e:
-        log.error(f"[WS ERROR] Agent invocation failed: {e}", exc_info=True)
+        log.error("[WS ERROR] Agent invocation failed: %s", e, exc_info=True)
         try:
             await websocket.send_json({"type": "error", "content": f"Agent error: {e}"})
         except Exception:
