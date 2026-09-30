@@ -1,0 +1,1323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Herocore — Slack-to-AgentCore Bridge Framework</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+  :root {
+    --bg-dark: #0a0e1a;
+    --bg-card: #111827;
+    --bg-card-hover: #1a2238;
+    --accent-blue: #3b82f6;
+    --accent-cyan: #06b6d4;
+    --accent-purple: #8b5cf6;
+    --accent-orange: #f59e0b;
+    --accent-green: #10b981;
+    --accent-pink: #ec4899;
+    --accent-red: #ef4444;
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --border: #1e293b;
+    --glow-blue: rgba(59, 130, 246, 0.15);
+    --glow-purple: rgba(139, 92, 246, 0.15);
+    --glow-cyan: rgba(6, 182, 212, 0.15);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html {
+    scroll-behavior: smooth;
+    scroll-snap-type: y mandatory;
+    overflow-y: scroll;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    line-height: 1.6;
+  }
+
+  /* --- SLIDE SYSTEM --- */
+  .slide {
+    min-height: 100vh;
+    scroll-snap-align: start;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 4rem 6rem;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .slide::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(ellipse at 20% 50%, var(--glow-blue) 0%, transparent 60%),
+                radial-gradient(ellipse at 80% 20%, var(--glow-purple) 0%, transparent 60%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .slide > * { position: relative; z-index: 1; }
+
+  /* --- NAVIGATION --- */
+  .nav {
+    position: fixed;
+    right: 2rem;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    z-index: 1000;
+  }
+
+  .nav a {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: all 0.3s;
+    display: block;
+    position: relative;
+  }
+
+  .nav a:hover, .nav a.active {
+    background: var(--accent-cyan);
+    box-shadow: 0 0 12px var(--accent-cyan);
+    transform: scale(1.4);
+  }
+
+  .nav a .tooltip {
+    position: absolute;
+    right: 24px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+
+  .nav a:hover .tooltip { opacity: 1; }
+
+  /* --- PROGRESS BAR --- */
+  .progress-bar {
+    position: fixed;
+    top: 0; left: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan), var(--accent-purple));
+    z-index: 1001;
+    transition: width 0.3s;
+  }
+
+  /* --- TYPOGRAPHY --- */
+  h1 {
+    font-size: 4.5rem;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+    margin-bottom: 1.5rem;
+  }
+
+  h1 .gradient {
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan), var(--accent-purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  h2 {
+    font-size: 3rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    margin-bottom: 1.5rem;
+    line-height: 1.15;
+  }
+
+  h2 .gradient {
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  h3 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 1rem;
+    color: var(--accent-cyan);
+  }
+
+  .subtitle {
+    font-size: 1.5rem;
+    font-weight: 300;
+    color: var(--text-secondary);
+    max-width: 700px;
+    line-height: 1.6;
+  }
+
+  .big-quote {
+    font-size: 1.75rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    max-width: 800px;
+    line-height: 1.5;
+    font-style: italic;
+    border-left: 4px solid var(--accent-purple);
+    padding-left: 1.5rem;
+  }
+
+  .big-quote em {
+    color: var(--text-primary);
+    font-style: normal;
+    font-weight: 700;
+  }
+
+  .punchline {
+    font-size: 2rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent-orange), var(--accent-pink));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-top: 2rem;
+  }
+
+  /* --- BADGE --- */
+  .badge {
+    display: inline-block;
+    padding: 0.3rem 0.9rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 1.5rem;
+  }
+
+  .badge-blue { background: rgba(59,130,246,0.15); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.3); }
+  .badge-cyan { background: rgba(6,182,212,0.15); color: var(--accent-cyan); border: 1px solid rgba(6,182,212,0.3); }
+  .badge-purple { background: rgba(139,92,246,0.15); color: var(--accent-purple); border: 1px solid rgba(139,92,246,0.3); }
+  .badge-orange { background: rgba(245,158,11,0.15); color: var(--accent-orange); border: 1px solid rgba(245,158,11,0.3); }
+  .badge-green { background: rgba(16,185,129,0.15); color: var(--accent-green); border: 1px solid rgba(16,185,129,0.3); }
+  .badge-pink { background: rgba(236,72,153,0.15); color: var(--accent-pink); border: 1px solid rgba(236,72,153,0.3); }
+
+  /* --- CARDS & GRIDS --- */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 2rem; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.5rem; margin-top: 2rem; }
+
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 2rem;
+    transition: all 0.3s;
+  }
+
+  .card:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--accent-blue);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  }
+
+  .card-icon {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+    display: block;
+  }
+
+  .card h3 { margin-bottom: 0.75rem; }
+
+  .card p {
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+    line-height: 1.6;
+  }
+
+  /* --- CODE BLOCKS --- */
+  pre {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    overflow-x: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    line-height: 1.7;
+    color: #e6edf3;
+    margin: 1.5rem 0;
+  }
+
+  code {
+    font-family: 'JetBrains Mono', monospace;
+    background: rgba(59,130,246,0.1);
+    color: var(--accent-cyan);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+
+  pre code { background: none; padding: 0; color: inherit; }
+
+  .code-comment { color: #8b949e; }
+  .code-keyword { color: #ff7b72; }
+  .code-string { color: #a5d6ff; }
+  .code-type { color: #79c0ff; }
+  .code-func { color: #d2a8ff; }
+
+  /* --- TABLES --- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1.5rem 0;
+    font-size: 0.95rem;
+  }
+
+  th {
+    text-align: left;
+    padding: 0.85rem 1.25rem;
+    background: rgba(59,130,246,0.08);
+    color: var(--accent-cyan);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-bottom: 2px solid var(--border);
+  }
+
+  td {
+    padding: 0.85rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+
+  td:first-child { color: var(--text-primary); font-weight: 500; }
+
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  /* --- EMOJI TABLE --- */
+  .emoji-table td:first-child { font-size: 1.5rem; text-align: center; width: 60px; }
+
+  /* --- DIAGRAM --- */
+  .diagram-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin: 2rem 0;
+    padding: 2rem;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+  }
+
+  .diagram-container img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    filter: invert(0.88) hue-rotate(180deg) saturate(1.2) brightness(1.1);
+  }
+
+  /* --- FLOW LIST --- */
+  .flow-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 2rem 0;
+  }
+
+  .flow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 1.5rem;
+    padding: 1.25rem 0;
+    position: relative;
+  }
+
+  .flow-step:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 19px;
+    top: 3.5rem;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--accent-blue), transparent);
+  }
+
+  .flow-num {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+  }
+
+  .flow-content h4 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 0.3rem;
+  }
+
+  .flow-content p {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+  }
+
+  /* --- SPLIT LAYOUT --- */
+  .split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4rem;
+    align-items: center;
+  }
+
+  .split-wide {
+    display: grid;
+    grid-template-columns: 1.2fr 0.8fr;
+    gap: 3rem;
+    align-items: start;
+  }
+
+  /* --- FEATURE LIST --- */
+  .feature-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin-top: 1.5rem;
+  }
+
+  .feature-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+    line-height: 1.5;
+  }
+
+  .feature-list li::before {
+    content: '→';
+    color: var(--accent-cyan);
+    font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 0.1rem;
+  }
+
+  .feature-list li strong { color: var(--text-primary); }
+
+  /* --- WS PROTOCOL --- */
+  .ws-flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    margin: 1.5rem 0;
+  }
+
+  .ws-msg {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.6rem 1rem;
+    border-radius: 8px;
+    background: rgba(0,0,0,0.3);
+  }
+
+  .ws-dir {
+    font-weight: 600;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    width: 40px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .ws-dir.down { color: var(--accent-blue); }
+  .ws-dir.up { color: var(--accent-green); }
+  .ws-dir.exec { color: var(--accent-orange); }
+
+  .ws-arrow {
+    font-size: 1.2rem;
+    width: 24px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .ws-arrow.down { color: var(--accent-blue); }
+  .ws-arrow.up { color: var(--accent-green); }
+  .ws-arrow.exec { color: var(--accent-orange); }
+
+  .ws-payload { color: var(--text-secondary); }
+  .ws-payload .key { color: var(--accent-cyan); }
+
+  /* --- KEY INSIGHT BOX --- */
+  .insight-box {
+    background: linear-gradient(135deg, rgba(139,92,246,0.08), rgba(6,182,212,0.08));
+    border: 1px solid rgba(139,92,246,0.25);
+    border-radius: 16px;
+    padding: 2rem;
+    margin: 2rem 0;
+    text-align: center;
+  }
+
+  .insight-box p {
+    font-size: 1.4rem;
+    font-weight: 600;
+    line-height: 1.5;
+  }
+
+  .insight-box .highlight {
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* --- TITLE SLIDE EXTRAS --- */
+  .title-meta {
+    display: flex;
+    gap: 2rem;
+    margin-top: 3rem;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+  }
+
+  .title-meta span {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* --- DEMO CHECKLIST --- */
+  .demo-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    margin-top: 1.5rem;
+  }
+
+  .demo-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    font-size: 1.05rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+
+  .demo-num {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+    flex-shrink: 0;
+    color: white;
+  }
+
+  .demo-list li strong { color: var(--text-primary); }
+
+  /* --- SUMMARY TABLE --- */
+  .summary-table {
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    margin-top: 2rem;
+  }
+
+  .summary-table table { margin: 0; }
+
+  .summary-table th {
+    padding: 1rem 1.5rem;
+    font-size: 0.85rem;
+  }
+
+  .summary-table td {
+    padding: 1rem 1.5rem;
+    font-size: 0.9rem;
+  }
+
+  /* --- ANIMATION --- */
+  @keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(30px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .slide > * {
+    animation: fadeInUp 0.6s ease-out both;
+  }
+
+  .slide > *:nth-child(2) { animation-delay: 0.1s; }
+  .slide > *:nth-child(3) { animation-delay: 0.2s; }
+  .slide > *:nth-child(4) { animation-delay: 0.3s; }
+
+  /* --- KEYBOARD HINT --- */
+  .key-hint {
+    position: fixed;
+    bottom: 2rem;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    display: flex;
+    gap: 1.5rem;
+    z-index: 999;
+    opacity: 0.5;
+    transition: opacity 0.3s;
+  }
+
+  .key-hint:hover { opacity: 1; }
+
+  kbd {
+    display: inline-block;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+  }
+
+  /* --- RESPONSIVE --- */
+  @media (max-width: 1100px) {
+    .slide { padding: 3rem; }
+    h1 { font-size: 3rem; }
+    h2 { font-size: 2.2rem; }
+    .split, .split-wide, .grid-2 { grid-template-columns: 1fr; }
+    .grid-3 { grid-template-columns: 1fr 1fr; }
+  }
+
+  @media (max-width: 700px) {
+    .slide { padding: 2rem 1.5rem; }
+    h1 { font-size: 2.2rem; }
+    h2 { font-size: 1.6rem; }
+    .grid-3 { grid-template-columns: 1fr; }
+    .nav { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="progress-bar" id="progressBar"></div>
+
+<nav class="nav" id="sideNav">
+  <a href="#title"><span class="tooltip">Title</span></a>
+  <a href="#problem"><span class="tooltip">The Problem</span></a>
+  <a href="#architecture"><span class="tooltip">Architecture</span></a>
+  <a href="#harness-slack"><span class="tooltip">Slack Bridge</span></a>
+  <a href="#harness-proxy"><span class="tooltip">MCP Proxy</span></a>
+  <a href="#harness-behaviors"><span class="tooltip">Harness Behaviors</span></a>
+  <a href="#agentcore-tools"><span class="tooltip">AgentCore Tools</span></a>
+  <a href="#agentcore-state"><span class="tooltip">Thread State</span></a>
+  <a href="#subagents"><span class="tooltip">Sub-Agents</span></a>
+  <a href="#implementation"><span class="tooltip">Implementation</span></a>
+  <a href="#vision"><span class="tooltip">Vision</span></a>
+  <a href="#auth"><span class="tooltip">Auth Injection</span></a>
+  <a href="#demo"><span class="tooltip">Demo</span></a>
+  <a href="#summary"><span class="tooltip">Summary</span></a>
+</nav>
+
+<div class="key-hint">
+  <span><kbd>↓</kbd> <kbd>↑</kbd> scroll</span>
+  <span><kbd>Space</kbd> next slide</span>
+</div>
+
+<!-- ====== SLIDE 1: TITLE ====== -->
+<section class="slide" id="title">
+  <span class="badge badge-cyan">Framework</span>
+  <h1><span class="gradient">Herocore</span></h1>
+  <p class="subtitle">
+    A Slack-to-AgentCore bridge framework with bidirectional MCP tool proxying.
+    <br>One container. Env vars only. Your tools, your network, your agent.
+  </p>
+  <div class="title-meta">
+    <span>Amazon Bedrock AgentCore</span>
+    <span>|</span>
+    <span>Strands Agent Framework</span>
+    <span>|</span>
+    <span>WebSocket Protocol</span>
+  </div>
+</section>
+
+<!-- ====== SLIDE 2: THE PROBLEM ====== -->
+<section class="slide" id="problem">
+  <span class="badge badge-orange">Motivation</span>
+  <h2>The Problem</h2>
+  <div class="split">
+    <div>
+      <p class="big-quote">
+        You have an agent in <em>AgentCore</em>.
+        Users in <em>Slack</em>.
+        Tools scattered across environments that AgentCore <em>may or may not be able to reach</em>.
+      </p>
+      <p class="punchline">How do you connect all three?</p>
+    </div>
+    <div>
+      <div class="card" style="border-color: var(--accent-red); background: rgba(239,68,68,0.05);">
+        <h3 style="color: var(--accent-red);">The Old Way</h3>
+        <ul class="feature-list">
+          <li><strong>LLM-powered thread scraping</strong> to reconstruct conversation state</li>
+          <li><strong>Redis</strong> to store and expire thread history</li>
+          <li><strong>LLM summarization</strong> to compress context into a state store</li>
+          <li><strong>Custom webhook endpoints</strong> with public ingress and TLS certs</li>
+          <li><strong>Network gymnastics</strong> to route tools through VPCs and firewalls</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SLIDE 3: ARCHITECTURE ====== -->
+<section class="slide" id="architecture">
+  <span class="badge badge-purple">Architecture</span>
+  <h2>The <span class="gradient">Full Picture</span></h2>
+  <div class="diagram-container">
+    <img src="https://img.plantuml.biz/plantuml/png/VLNRJjj047ttLqoDr4Aaq2Hj05KGOK8CL0r4X8g7Kg6DFN5MiNUjtJMNLlnxPzScSIvgyf3Dp9dBcJbUdsh3b2corFjWPfWXv2dZmajnQi18K3oP6OYvmiXmAJmzvo9dYcMWP27YI2g12evgTY5Zr9X3jrK7Cp6tniEwCSOfAr8JIc6k6LKE56TfpQzdB9RFN2GmPQb6hvwFsc4YIH7-Ua2VCnRD4zTHNwPI7H-FKxBqUh0JVXbqmsu9aYf6jGuuF6k7GSS1jgSwbz4SbOKEsc4t76pcMY9QdQEZy_P_aWNtOzTLI7srDZDLxi51jzrgUMzrof7CSYbGcEsKuNd63QvdX9sl7Vjrza0f-LoP3zhsQokmo931T_E0dngL3qoxW-SjnrpvxwMQwvn5wCDoXBQVYMs4gLS2sc4O698C81XTkMmEINzilLhEVg6Dp4W_0_74bHIPPRTRJXFwbg_6FLjfCM1RQZa8lz6uH2L9X0YNZ9IeTQFn87OdqkpdhtkkT6Ntt4AcokhC_o4ZbiAmFu8xALFjLnEj9SwYl9bmCoicBia5DziGKvwYVjK6CuSAnmHwM-COPEoF5726CJKwjsJA7Mym2H8wz2sLsq8Odc6ZuR8kx2iKREDWdngtZMqKefJJx-DZWnvZ8abZ6IdvmZ4kvz9tRiT_FP8bQu7zL1OnLJFy2T-ZoV8U_BRIsPYcJJS5JORsNaoQBjks1Y-OGHWyiRHWfC1opgoIS0qsn4oIhZx2FPRBeAHk9hNICJDimhIjFcCAOoY37Bmysgry8aq9KLvashCAX-DcixTG9tm3_vIq0vyfI6jgNFlUmkcWbPeiqlPJQlr1mEwrX2kHAFBj-Pxt3dCn91w7lxox6_chhd3iFD_7DzVDsr6_7ddogxfCVf_qbXhOB7mJ56O6myxGrlr4JHXKWjHTavCi35sYtjBIf6jLKFcw1hPv5pkkEOlSKh9xMZSkz-8jZj1qBn3oLckebOJz1SNzrSdQZb4x-G6-O5JOZH7PYRs2wALKIfludgA8wTNr3m00"
+         alt="Herocore Full Architecture Diagram">
+  </div>
+</section>
+
+<!-- ====== SLIDE 4: HARNESS — SLACK BRIDGE ====== -->
+<section class="slide" id="harness-slack">
+  <span class="badge badge-blue">Harness</span>
+  <h2>Slack Bridge <span style="color: var(--text-muted); font-weight: 400;">(Socket Mode)</span></h2>
+  <div class="split">
+    <div>
+      <p style="color: var(--text-secondary); font-size: 1.1rem; margin-bottom: 2rem;">
+        Connects to Slack via <strong style="color: var(--text-primary);">Socket Mode</strong> &mdash;
+        a WebSocket-based protocol that requires <strong style="color: var(--accent-cyan);">no public endpoint</strong>.
+        No ingress rules. No load balancer. No webhook URL rotation.
+      </p>
+      <ul class="feature-list">
+        <li>Identifies <strong>@-mentions</strong> vs ambient channel messages</li>
+        <li>Downloads and <strong>base64-encodes image attachments</strong> for multimodal payloads</li>
+        <li>Fetches <strong>recent thread history</strong> to build conversational context</li>
+        <li>Maps threads to deterministic session IDs: <code>slack_{sha256(channel:thread_ts)}</code></li>
+      </ul>
+    </div>
+    <div>
+      <pre><code><span class="code-comment"># bot.py — startup</span>
+<span class="code-keyword">from</span> slack_bolt <span class="code-keyword">import</span> App
+<span class="code-keyword">from</span> slack_bolt.adapter.socket_mode <span class="code-keyword">import</span> SocketModeHandler
+
+app = <span class="code-func">App</span>(token=SLACK_BOT_TOKEN)
+handler = <span class="code-func">SocketModeHandler</span>(app, SLACK_APP_TOKEN)
+handler.<span class="code-func">start</span>()
+
+<span class="code-comment"># Every message → harness → gate or invoke</span>
+<span class="code-keyword">@app.event</span>(<span class="code-string">"message"</span>)
+<span class="code-keyword">def</span> <span class="code-func">handle</span>(event, say):
+    session_id = <span class="code-func">make_session_id</span>(
+        channel, thread_ts
+    )  <span class="code-comment"># sha256 → deterministic</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SLIDE 5: HARNESS — MCP PROXY ====== -->
+<section class="slide" id="harness-proxy">
+  <span class="badge badge-blue">Harness</span>
+  <h2>MCP Tool <span class="gradient">Proxy</span></h2>
+  <div class="split">
+    <div>
+      <p style="color: var(--text-secondary); font-size: 1.05rem; margin-bottom: 1.5rem;">
+        Local MCP tool servers run as Docker Compose sidecars.
+        The harness proxies them to AgentCore over a <strong style="color: var(--text-primary);">bidirectional WebSocket</strong>.
+      </p>
+      <div class="ws-flow">
+        <div class="ws-msg">
+          <span class="ws-dir down">Agent</span>
+          <span class="ws-arrow down">↓</span>
+          <span class="ws-payload">{<span class="key">"type"</span>: "tool_call", <span class="key">"name"</span>: "client__read_file", ...}</span>
+        </div>
+        <div class="ws-msg">
+          <span class="ws-dir exec">Exec</span>
+          <span class="ws-arrow exec">⚡</span>
+          <span class="ws-payload">Harness executes locally via JSON-RPC → mcp-filesystem</span>
+        </div>
+        <div class="ws-msg">
+          <span class="ws-dir up">Reply</span>
+          <span class="ws-arrow up">↑</span>
+          <span class="ws-payload">{<span class="key">"type"</span>: "tool_result", <span class="key">"content"</span>: "...file contents..."}</span>
+        </div>
+      </div>
+
+      <div class="diagram-container" style="margin-top: 2rem; padding: 1.5rem;">
+        <img src="https://img.plantuml.biz/plantuml/png/NLDDRzim3BthLn0z9GSjsu3jqCFGrK7H04aESuPT0XICnTbUR2aGPQ1faFy-VNdkueDXyZr-FT8FxD2weUy47rjzGeizMAeSwheZk0ZmpoDMnzgQGQl2TCR2hwPrb11Z5TdaNQ8zFdP30duajjLauTD7SHLYIdfNTZuX54OxUdLtW0p9awhDYWQrfWvMotd0WhbQ9cZNM485kp8YoTgL2LiZEzZ2XfYn9awngSPD_MVqVJ73x63SXzDv7biOdRc9P-IcrJKy3RfohT5xpGr-_l9rdhZSP9flm8-uqdyeqX8SdNnJzNjDsdb9oBVO6tk6yioE-bXymdBvLudzcvO7KjPKHua1hpmkxQ1TsvEi1dQcbmEJbQsAPN_wxr6eqe_Ysnarp6P6uqkXmmEoRwomXbcE4KzOETxhHSZCYqkLbl7IgklYTu1Ylv5qaoRlfdJeoCVpqFTeMxh9SU5K9nXfzIClo9Ls3L9-6qM4UzZWYS6PE9yVw3zIMCHu1fD7XFTDbiAJ735mEBMNI-CPLp72WPhbU--QP1C9ZTuuVCZeZykQBga1M-o9JrYH-1ULSepplO_8Maqn-L311qotS9_lYXIeDbnITzxhsTR0Uhs1hEyRXhC3JQH8pOLu8Atyt_mN"
+             alt="WebSocket MCP Proxy Sequence" style="max-height: 400px;">
+      </div>
+    </div>
+    <div>
+      <h3>mcp_tools.json</h3>
+      <p style="color: var(--text-secondary); margin-bottom: 1rem;">Declarative config. Auth tokens use <code>${ENV_VAR}</code> references.</p>
+      <pre><code>{
+  <span class="code-string">"servers"</span>: [
+    {
+      <span class="code-string">"name"</span>: <span class="code-string">"github"</span>,
+      <span class="code-string">"transport"</span>: <span class="code-string">"http"</span>,
+      <span class="code-string">"url"</span>: <span class="code-string">"http://mcp-github:8082/mcp"</span>,
+      <span class="code-string">"auth"</span>: {
+        <span class="code-string">"type"</span>: <span class="code-string">"bearer"</span>,
+        <span class="code-string">"token"</span>: <span class="code-string">"${GITHUB_TOKEN}"</span>
+      },
+      <span class="code-string">"tools"</span>: [
+        {
+          <span class="code-string">"name"</span>: <span class="code-string">"create_pull_request"</span>,
+          <span class="code-string">"description"</span>: <span class="code-string">"..."</span>,
+          <span class="code-string">"input_schema"</span>: { ... }
+        }
+      ]
+    },
+    {
+      <span class="code-string">"name"</span>: <span class="code-string">"filesystem"</span>,
+      <span class="code-string">"transport"</span>: <span class="code-string">"http"</span>,
+      <span class="code-string">"url"</span>: <span class="code-string">"http://mcp-filesystem:8000/mcp"</span>,
+      <span class="code-string">"tools"</span>: [ ... ]
+    }
+  ]
+}</code></pre>
+      <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 0.75rem;">
+        Supported auth types: <code>bearer</code>, <code>header</code>, <code>basic</code>
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SLIDE 6: HARNESS — BEHAVIORS ====== -->
+<section class="slide" id="harness-behaviors">
+  <span class="badge badge-blue">Harness</span>
+  <h2>Harness <span class="gradient">Behaviors</span></h2>
+  <p style="color: var(--text-secondary); font-size: 1.1rem; margin-bottom: 1.5rem;">
+    The harness owns the UX layer. The agent never has to deal with rate limits, abuse, or visual feedback.
+  </p>
+  <div class="grid-3">
+    <div class="card">
+      <span class="card-icon">🚦</span>
+      <h3 style="color: var(--accent-blue);">Gate Routing</h3>
+      <p>Two-phase processing. Ambient messages go through a <strong>gate evaluation</strong> sub-agent
+        &mdash; classified as RESPOND, IGNORE, or INAPPROPRIATE. Direct @-mentions skip the gate.</p>
+    </div>
+    <div class="card">
+      <span class="card-icon">⏱️</span>
+      <h3 style="color: var(--accent-orange);">Throttle &amp; Ban</h3>
+      <p>Per-user rate limiting (default 5s window). Strike-based banning &mdash; 3 strikes in 10 min
+        triggers a 60-min ban. All values configurable via env vars.</p>
+    </div>
+    <div class="card">
+      <span class="card-icon">🔒</span>
+      <h3 style="color: var(--accent-purple);">Thread Control</h3>
+      <p>Per-thread locking prevents race conditions. Users can <code>@bot silence</code> to permanently
+        mute the bot in a thread.</p>
+    </div>
+  </div>
+
+  <div style="margin-top: 2.5rem;">
+    <h3 style="color: var(--text-primary);">Emoji Feedback</h3>
+    <p style="color: var(--text-secondary); margin-bottom: 1rem;">Visual status via Slack reactions &mdash; users see progress without any text output.</p>
+    <table class="emoji-table" style="max-width: 600px;">
+      <tr><td>🤔</td><td>Evaluating gate</td></tr>
+      <tr><td>⏳</td><td>Generating response</td></tr>
+      <tr><td>💡</td><td>Complete</td></tr>
+      <tr><td>👍</td><td>Ignoring (ambient chatter)</td></tr>
+      <tr><td>☝️</td><td>Inappropriate content</td></tr>
+      <tr><td>🙈🙉🙊</td><td>User banned</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ====== SLIDE 7: AGENTCORE — TOOLS ====== -->
+<section class="slide" id="agentcore-tools">
+  <span class="badge badge-cyan">AgentCore</span>
+  <h2>Unified <span class="gradient">Tool Surface</span></h2>
+  <div class="split">
+    <div>
+      <p style="color: var(--text-secondary); font-size: 1.05rem; margin-bottom: 2rem;">
+        The agent sees a single, unified tool surface. Both <strong style="color: var(--text-primary);">cloud-side</strong>
+        tools and <strong style="color: var(--text-primary);">harness-side</strong> tools appear together.
+        Namespace prefixes prevent collisions.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Prefix</th><th>Source</th><th>Examples</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>agent__</code></td>
+            <td>Cloud-side (AgentCore)</td>
+            <td style="font-size: 0.85rem;"><code>agent__read_file</code>, <code>agent__http_get</code>, <code>agent__channel_memory_store</code></td>
+          </tr>
+          <tr>
+            <td><code>client__</code></td>
+            <td>Harness-side (proxied)</td>
+            <td style="font-size: 0.85rem;"><code>client__read_file</code>, <code>client__create_pull_request</code></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="insight-box" style="margin-top: 2rem;">
+        <p>Same tool concept, <span class="highlight">different execution context</span>.<br>
+        <code>agent__read_file</code> reads the cloud sandbox.<br>
+        <code>client__read_file</code> reads the harness environment.</p>
+      </div>
+    </div>
+    <div>
+      <div class="diagram-container" style="padding: 1.5rem;">
+        <img src="https://img.plantuml.biz/plantuml/png/TLJRRjf047tVhnZv2TH0sahfWoMg80AzA2G8chTArc1FO9NrhhMx9j0e_vxPvL8xfM_hcNDcpjnyxJnQNvTAk2UfAxHOGedRAJc7Arh8FmIVhZuApBsna2mKva_muCWcW2u-17Eyp6M5saFo7QrcAdIMnlUhNJV23iOsiiohtgDKv7REKnbnqz6iZHckIFkHiHJTyQiD-8QUO54lUnXy4HLCGWHbqFjwJ9t2i5nAXa2vBmoa1h-sX8KuIcwYfrZ1Wb_IQFXna_xMBXIUlRWrVhxwqidNg3MfT1yXywxxUZRCi2Y04RddE2amN6fkyYfxn9nI8GQ3g1RcflPiXjaQ7S5Wq8mL02cCDwZg03tAxnpKSVzSLyGelMRc-NWnkx-xsUSWJHQ3XhCPJfo7gWXn6eBNfhOhXUni4k8SKfWO-uosE4dw0BdHdhOUDXBXcKcNbq94S8DrUpiD6PpHNB7GXXEQ3SygkYyQhOkyWd9Pa0FfGHCL3hm9x08GbCbHGTYWMEJCcgsa0duPes2yfRoE1NEf9mMds2-9trMKf91uHcSSHoKNa6Wiep5NOLEoBCus961dlzzlZPXNDOMVY_kxtdms-fjFiBqzY0dpzutHtftfuZijbbojV51pu0GF9qzUOvKZKrQAsgDyt-69rAZ2tNAiocX7HqHR5eDWgDqpzxx2dJB_kOH_bs9PgsLh7yAjfNmkEYnxfNPXIFiVnU72hjd5VvWt"
+             alt="AgentCore Tool Architecture" style="max-height: 500px;">
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SLIDE 8: AGENTCORE — THREAD STATE ====== -->
+<section class="slide" id="agentcore-state">
+  <span class="badge badge-cyan">AgentCore</span>
+  <h2>Thread State <span style="color: var(--text-muted); font-weight: 400;">Without LLMs and Redis</span></h2>
+  <div class="split">
+    <div>
+      <p style="color: var(--text-secondary); font-size: 1.05rem; margin-bottom: 2rem;">
+        Instead of scraping Slack or maintaining a separate state store,
+        Herocore uses <strong style="color: var(--accent-cyan);">two HTTP headers</strong> to let AgentCore manage state natively.
+      </p>
+      <div class="card" style="margin-bottom: 1.5rem; border-left: 3px solid var(--accent-blue);">
+        <h3 style="color: var(--accent-blue);">Session ID Header</h3>
+        <p><code>slack_{sha256(channel:thread_ts)}</code></p>
+        <ul class="feature-list" style="margin-top: 0.75rem;">
+          <li>One AgentCore session per Slack thread</li>
+          <li>Agent instance cached in memory, keyed by session ID</li>
+          <li>Thread context injected directly from Slack</li>
+        </ul>
+      </div>
+      <div class="card" style="border-left: 3px solid var(--accent-purple);">
+        <h3 style="color: var(--accent-purple);">User ID Header</h3>
+        <p><code>x-amzn-bedrock-agentcore-runtime-custom-user-id</code></p>
+        <ul class="feature-list" style="margin-top: 0.75rem;">
+          <li>Maps to <strong>channel ID</strong> (channel-scoped, not user-scoped)</li>
+          <li>Controls memory namespace:<br>
+            <code>/users/{channel_id}/facts</code><br>
+            <code>/summaries/{channel_id}/{session_id}</code></li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <div class="card" style="background: rgba(16,185,129,0.05); border-color: var(--accent-green);">
+        <h3 style="color: var(--accent-green); font-size: 1.3rem;">The Slack thread IS the state</h3>
+        <p style="font-size: 1.05rem; margin-bottom: 1.5rem;">
+          The harness fetches the last N messages (configurable via <code>THREAD_CONTEXT_LIMIT</code>)
+          and injects them as context. No separate state store needed.
+        </p>
+        <table>
+          <thead><tr><th>Traditional</th><th>Herocore</th></tr></thead>
+          <tbody>
+            <tr><td>Scrape Slack API</td><td style="color: var(--accent-green);">Thread context in payload</td></tr>
+            <tr><td>Redis state store</td><td style="color: var(--accent-green);">Session header</td></tr>
+            <tr><td>LLM summarization</td><td style="color: var(--accent-green);">Raw thread messages</td></tr>
+            <tr><td>Custom memory DB</td><td style="color: var(--accent-green);">AgentCore Memory (native)</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SLIDE 9: SUB-AGENTS ====== -->
+<section class="slide" id="subagents">
+  <span class="badge badge-purple">Sub-Agents</span>
+  <h2>Sessionless <span class="gradient">Sub-Agent Flows</span></h2>
+  <p style="color: var(--text-secondary); font-size: 1.05rem; max-width: 800px; margin-bottom: 2rem;">
+    The AgentCore layer spawns <strong style="color: var(--text-primary);">ephemeral, sessionless sub-agents</strong>
+    for focused tasks that shouldn't pollute the main agent's context or tool access.
+  </p>
+  <div class="grid-2">
+    <div class="card">
+      <span class="card-icon">🚦</span>
+      <h3 style="color: var(--accent-blue);">Gate Evaluator</h3>
+      <p>Classifies ambient messages as RESPOND / IGNORE / INAPPROPRIATE.
+        <strong>No tools, no session.</strong> Pure classification with ordered rules.</p>
+    </div>
+    <div class="card">
+      <span class="card-icon">🧠</span>
+      <h3 style="color: var(--accent-purple);">Memory Agents</h3>
+      <p><code>channel_memory_store</code> and <code>channel_memory_recall</code> use dedicated agents
+        with <strong>empty tool profiles</strong> (preventing recursion) but with a <code>session_manager</code>
+        wired to AgentCore Memory.</p>
+    </div>
+    <div class="card">
+      <span class="card-icon">🔍</span>
+      <h3 style="color: var(--accent-cyan);">Pre-Recall Agent</h3>
+      <p>On the first message in a new session, checks if stored channel memory is relevant.
+        Returns structured facts or <code>NO_RELEVANT_HISTORY</code>.
+        <strong>Avoids polluting conversations</strong> with irrelevant historical context.</p>
+    </div>
+    <div class="card">
+      <span class="card-icon">🌐</span>
+      <h3 style="color: var(--accent-orange);">Web Extraction Agent</h3>
+      <p>When <code>http_get</code> fetches a page, a nested agent distills raw HTML into
+        content <strong>relevant to the current thread</strong>. Tool-less, sessionless.</p>
+    </div>
+  </div>
+  <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 2rem; text-align: center;">
+    All sub-agents execute, return a result, and are discarded. No cached state, no tool access beyond what they need.
+  </p>
+</section>
+
+<!-- ====== SLIDE 10: IMPLEMENTATION ====== -->
+<section class="slide" id="implementation">
+  <span class="badge badge-green">Implementation</span>
+  <h2>An Agent That Can <span class="gradient">Modify Itself</span></h2>
+  <div class="split">
+    <div>
+      <h3 style="color: var(--text-primary);">Docker Compose Orchestration</h3>
+      <p style="color: var(--text-secondary); margin-bottom: 1.5rem;">
+        Three containers. The filesystem server mounts the project root.
+        The GitHub server connects with a PAT. Both expose Streamable HTTP endpoints
+        that the harness proxies to AgentCore.
+      </p>
+      <pre><code><span class="code-keyword">services</span>:
+  <span class="code-type">harness</span>:
+    build: .
+    env_file: .env
+    volumes:
+      - ./mcp_tools.json:/app/mcp_tools.json:ro
+
+  <span class="code-type">mcp-filesystem</span>:
+    build:
+      dockerfile: Dockerfile.mcp-filesystem
+    volumes:
+      - .:/workspace:ro  <span class="code-comment"># Agent sees its own code</span>
+
+  <span class="code-type">mcp-github</span>:
+    image: ghcr.io/github/github-mcp-server
+    command: [<span class="code-string">"http"</span>, <span class="code-string">"--port"</span>, <span class="code-string">"8082"</span>]
+    environment:
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_TOKEN}</code></pre>
+    </div>
+    <div>
+      <h3 style="color: var(--text-primary);">What the agent can do</h3>
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="flow-num">1</div>
+          <div class="flow-content">
+            <h4>Read its own source code</h4>
+            <p>via <code>client__read_file</code> and <code>client__list_directory</code></p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">2</div>
+          <div class="flow-content">
+            <h4>Search across the codebase</h4>
+            <p>via <code>client__search_files</code> and <code>client__search_code</code></p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">3</div>
+          <div class="flow-content">
+            <h4>Create a branch</h4>
+            <p>via <code>client__create_branch</code></p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">4</div>
+          <div class="flow-content">
+            <h4>Commit changes</h4>
+            <p>via <code>client__create_or_update_file</code></p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">5</div>
+          <div class="flow-content">
+            <h4>Open a pull request</h4>
+            <p>via <code>client__create_pull_request</code></p>
+          </div>
+        </div>
+      </div>
+      <div class="insight-box" style="margin-top: 1rem;">
+        <p style="font-size: 1.1rem;"><em>"Make the gate prompt more lenient"</em><br>
+        → agent explores, branches, commits, opens a PR.<br>
+        <span class="highlight">All from a Slack message.</span></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SLIDE 11: VISION ====== -->
+<section class="slide" id="vision">
+  <span class="badge badge-pink">Vision</span>
+  <h2>A <span class="gradient">Configurable Bridge Image</span></h2>
+  <div class="split">
+    <div>
+      <p style="color: var(--text-secondary); font-size: 1.1rem; margin-bottom: 1.5rem;">
+        It is unclear whether every AgentCore instance will be able to reach into the right
+        environments &mdash; your VPC, your internal APIs, your on-prem services.
+      </p>
+      <p style="color: var(--text-secondary); font-size: 1.1rem; margin-bottom: 2rem;">
+        But <strong style="color: var(--accent-cyan);">you know where your harness is</strong>.
+        You know what it can access. And it can connect to AgentCore with
+        <strong style="color: var(--accent-cyan);">OAuth M2M</strong>.
+      </p>
+      <div class="card" style="border-color: var(--accent-pink); background: rgba(236,72,153,0.04);">
+        <h3 style="color: var(--accent-pink); font-size: 1.2rem;">The Idea</h3>
+        <p style="font-size: 1.05rem;">
+          Ship a <strong>single container image</strong> configured entirely via environment variables and secrets.
+          <strong>No config files mounted. No custom code required.</strong>
+        </p>
+        <ul class="feature-list" style="margin-top: 1rem;">
+          <li>Bridges <strong>Slack &harr; AgentCore</strong> (WebSocket)</li>
+          <li>Proxies <strong>harness-side MCP tools</strong> to the agent</li>
+          <li>Handles <strong>gate, throttle, ban, emoji, threads</strong></li>
+          <li>Deployers inject auth via <strong>env vars + mcp_tools.json</strong></li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <h3 style="color: var(--text-primary);">Why proxy instead of direct access?</h3>
+      <p style="color: var(--text-secondary); margin-bottom: 2rem;">
+        Rather than punching holes in network boundaries, the harness acts as a bridge.
+      </p>
+      <div class="card" style="margin-bottom: 1rem;">
+        <h3 style="color: var(--accent-green); font-size: 1rem;">The harness sits where the tools are</h3>
+        <p>Or where it has network access to reach them.</p>
+      </div>
+      <div class="card" style="margin-bottom: 1rem;">
+        <h3 style="color: var(--accent-blue); font-size: 1rem;">It authenticates to AgentCore</h3>
+        <p>Via Cognito M2M OAuth (client_credentials grant).</p>
+      </div>
+      <div class="card" style="margin-bottom: 1rem;">
+        <h3 style="color: var(--accent-purple); font-size: 1rem;">It exposes its local access</h3>
+        <p>To the cloud agent via the WebSocket proxy protocol.</p>
+      </div>
+      <div class="card">
+        <h3 style="color: var(--accent-orange); font-size: 1rem;">The agent doesn't need to know</h3>
+        <p>Where tools physically run. It calls <code>client__read_file</code> and gets a result. The harness handles routing.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SLIDE 12: AUTH INJECTION ====== -->
+<section class="slide" id="auth">
+  <span class="badge badge-orange">Deployer</span>
+  <h2>Auth <span class="gradient">Injection</span></h2>
+  <div class="split">
+    <div>
+      <p style="color: var(--text-secondary); font-size: 1.1rem; margin-bottom: 2rem;">
+        Deployers of Herocore instances are responsible for injecting the right authentication
+        into headers. The <code>mcp_tools.json</code> format supports this natively.
+      </p>
+      <div class="grid-2" style="gap: 1rem;">
+        <div>
+          <h3 style="font-size: 1rem;">Bearer Token</h3>
+          <pre><code>{
+  <span class="code-string">"auth"</span>: {
+    <span class="code-string">"type"</span>: <span class="code-string">"bearer"</span>,
+    <span class="code-string">"token"</span>: <span class="code-string">"${MY_TOKEN}"</span>
+  }
+}</code></pre>
+        </div>
+        <div>
+          <h3 style="font-size: 1rem;">Custom Header</h3>
+          <pre><code>{
+  <span class="code-string">"auth"</span>: {
+    <span class="code-string">"type"</span>: <span class="code-string">"header"</span>,
+    <span class="code-string">"name"</span>: <span class="code-string">"X-API-Key"</span>,
+    <span class="code-string">"value"</span>: <span class="code-string">"${KEY}"</span>
+  }
+}</code></pre>
+        </div>
+      </div>
+      <div class="insight-box" style="margin-top: 2rem;">
+        <p>The deployer sets the env var. The harness resolves it at runtime.<br>
+        <span class="highlight">The agent never sees the raw credential.</span></p>
+      </div>
+    </div>
+    <div>
+      <div class="card" style="background: rgba(16,185,129,0.05); border-color: var(--accent-green);">
+        <h3 style="color: var(--accent-green); font-size: 1.3rem;">Zero-code deployment</h3>
+        <p style="font-size: 1.05rem; line-height: 1.7;">
+          A team can deploy a Herocore instance:
+        </p>
+        <div class="flow-steps" style="margin-top: 1rem;">
+          <div class="flow-step">
+            <div class="flow-num" style="width: 32px; height: 32px; font-size: 0.8rem;">1</div>
+            <div class="flow-content">
+              <h4 style="font-size: 1rem;">Point at MCP-compatible tools</h4>
+              <p>Define servers, tools, and auth in <code>mcp_tools.json</code></p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num" style="width: 32px; height: 32px; font-size: 0.8rem;">2</div>
+            <div class="flow-content">
+              <h4 style="font-size: 1rem;">Inject auth tokens as env vars</h4>
+              <p>Secrets stay in the environment, never in config</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num" style="width: 32px; height: 32px; font-size: 0.8rem;">3</div>
+            <div class="flow-content">
+              <h4 style="font-size: 1rem;">Run the container</h4>
+              <p>Fully functional Slack-to-AgentCore bridge with tool proxying</p>
+            </div>
+          </div>
+        </div>
+        <p style="color: var(--accent-green); font-weight: 600; margin-top: 1.5rem; text-align: center; font-size: 1.1rem;">
+          No custom code required.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SLIDE 13: DEMO ====== -->
+<section class="slide" id="demo">
+  <span class="badge badge-green">Live</span>
+  <h2>Demo</h2>
+  <div class="split">
+    <div>
+      <h3 style="color: var(--text-primary);">What we'll see</h3>
+      <ol class="demo-list">
+        <li>
+          <span class="demo-num">1</span>
+          <span><strong>Gate triggers on a Slack message</strong> &mdash; watch the emoji reactions cycle: 🤔 → ⏳ → 💡</span>
+        </li>
+        <li>
+          <span class="demo-num">2</span>
+          <span><strong>Cloud-side tools</strong> &mdash; the agent reads files in AgentCore's sandbox and makes HTTP requests</span>
+        </li>
+        <li>
+          <span class="demo-num">3</span>
+          <span><strong>Client-side tools</strong> &mdash; the agent reads the codebase from the harness environment, searches GitHub</span>
+        </li>
+        <li>
+          <span class="demo-num">4</span>
+          <span><strong>Channel memory persists</strong> &mdash; the agent recalls context from earlier conversations in the same channel</span>
+        </li>
+        <li>
+          <span class="demo-num">5</span>
+          <span><strong>The agent opens a PR</strong> &mdash; from Slack: branch → commit → pull request</span>
+        </li>
+      </ol>
+    </div>
+    <div>
+      <h3 style="color: var(--text-primary);">Key things to notice</h3>
+      <div class="card" style="margin-bottom: 1rem; border-left: 3px solid var(--accent-green);">
+        <p><strong style="color: var(--accent-green);">No Redis, no thread state store</strong><br>
+        The Slack thread is the state. Session headers handle the rest.</p>
+      </div>
+      <div class="card" style="margin-bottom: 1rem; border-left: 3px solid var(--accent-cyan);">
+        <p><strong style="color: var(--accent-cyan);">No LLM summarization of history</strong><br>
+        Thread context is injected directly from Slack.</p>
+      </div>
+      <div class="card" style="margin-bottom: 1rem; border-left: 3px solid var(--accent-purple);">
+        <p><strong style="color: var(--accent-purple);">Tools from two environments</strong><br>
+        <code>agent__</code> and <code>client__</code> tools used seamlessly.</p>
+      </div>
+      <div class="card" style="border-left: 3px solid var(--accent-orange);">
+        <p><strong style="color: var(--accent-orange);">All configuration is env vars</strong><br>
+        Swap MCP tools, change auth, point at a different AgentCore &mdash; no code changes.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SLIDE 14: SUMMARY ====== -->
+<section class="slide" id="summary">
+  <span class="badge badge-purple">Summary</span>
+  <h2><span class="gradient">Herocore</span></h2>
+  <div class="summary-table">
+    <table>
+      <thead>
+        <tr><th>Layer</th><th>Responsibility</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Harness</strong></td><td>Slack bridge, MCP tool proxy, gate routing, emoji UX, throttling, banning, thread management</td></tr>
+        <tr><td><strong>AgentCore</strong></td><td>Agent runtime, cloud-side tools, memory, sub-agent flows, tool namespace unification</td></tr>
+        <tr><td><strong>herocore-bridge</strong></td><td>Shared library &mdash; WebSocket protocol, tool execution, auth resolution, config parsing</td></tr>
+        <tr><td><strong>mcp_tools.json</strong></td><td>Declarative tool configuration &mdash; endpoints, schemas, auth (all env-var resolvable)</td></tr>
+        <tr><td><strong>Docker Compose</strong></td><td>Orchestration of harness + MCP tool sidecars</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="insight-box" style="margin-top: 3rem;">
+    <p style="font-size: 1.6rem;">
+      Put the bridge <span class="highlight">where the access is</span>,<br>
+      and proxy it to <span class="highlight">where the intelligence is</span>.
+    </p>
+  </div>
+</section>
+
+<script>
+  // --- Navigation & Progress ---
+  const slides = document.querySelectorAll('.slide');
+  const navLinks = document.querySelectorAll('.nav a');
+  const progressBar = document.getElementById('progressBar');
+
+  function updateNav() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = (scrollTop / docHeight) * 100;
+    progressBar.style.width = progress + '%';
+
+    let current = 0;
+    slides.forEach((slide, i) => {
+      const rect = slide.getBoundingClientRect();
+      if (rect.top <= window.innerHeight / 2) current = i;
+    });
+
+    navLinks.forEach((link, i) => {
+      link.classList.toggle('active', i === current);
+    });
+  }
+
+  window.addEventListener('scroll', updateNav, { passive: true });
+  updateNav();
+
+  // --- Keyboard Navigation ---
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === ' ') {
+      e.preventDefault();
+      const current = [...slides].findIndex(s => {
+        const r = s.getBoundingClientRect();
+        return r.top >= -10 && r.top <= window.innerHeight / 2;
+      });
+      const next = Math.min(current + 1, slides.length - 1);
+      slides[next].scrollIntoView({ behavior: 'smooth' });
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const current = [...slides].findIndex(s => {
+        const r = s.getBoundingClientRect();
+        return r.top >= -10 && r.top <= window.innerHeight / 2;
+      });
+      const prev = Math.max(current - 1, 0);
+      slides[prev].scrollIntoView({ behavior: 'smooth' });
+    }
+  });
+</script>
+
+</body>
+</html>
