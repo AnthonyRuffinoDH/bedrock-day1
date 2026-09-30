@@ -7,7 +7,7 @@ Enables the Slack harness to act as a generic MCP tool proxy, allowing the cloud
 ## Requirements
 
 ### Requirement: Local MCP tool configuration
-The harness SHALL read a configuration file (`mcp_tools.json`) on startup that declares available local MCP servers. Each entry SHALL specify a server name, the command to launch it, and optionally its tool schemas. The harness SHALL NOT import or contain any tool-specific logic — it acts as a generic proxy.
+The harness SHALL read a configuration file (`mcp_tools.json`) on startup that declares available local MCP servers. Each entry SHALL specify a server name, transport type, and optionally its tool schemas and authentication configuration. The harness SHALL NOT import or contain any tool-specific logic — it acts as a generic proxy. Each server entry MAY include an `auth` object declaring the authentication method and credential references for that server's HTTP endpoint.
 
 #### Scenario: Valid configuration loaded
 - **WHEN** the harness starts and `mcp_tools.json` exists with valid server entries
@@ -20,6 +20,10 @@ The harness SHALL read a configuration file (`mcp_tools.json`) on startup that d
 #### Scenario: Malformed configuration
 - **WHEN** the harness starts and `mcp_tools.json` contains invalid JSON or missing required fields
 - **THEN** the harness SHALL log an error and start without client tools rather than crashing
+
+#### Scenario: Configuration with mixed auth servers
+- **WHEN** the harness starts with `mcp_tools.json` containing one server with no `auth` and one server with bearer `auth`
+- **THEN** the harness SHALL load tools from both servers and track the auth configuration per-server for use during tool execution
 
 ### Requirement: Client tool schema injection
 When opening a WebSocket connection, the harness SHALL include a `client_tools` array in the initial payload. Each entry SHALL be a JSON Schema-compatible tool definition containing `name`, `description`, and `input_schema`. The runtime SHALL merge these with its own cloud tools when constructing the agent for the request.
@@ -55,11 +59,15 @@ When the harness receives a `tool_call` message, it SHALL execute the tool again
 - **THEN** the harness SHALL send a `tool_result` with `content` describing the error, allowing the LLM to handle the failure gracefully
 
 ### Requirement: Decoupled tool execution
-The harness SHALL proxy tool calls to local MCP server processes via stdio subprocess communication or local HTTP. The harness SHALL NOT contain imports, client libraries, or connection logic for any specific tool (e.g., no `import redis`). Tool-specific behavior is entirely encapsulated in the MCP server binaries declared in the configuration.
+The harness SHALL proxy tool calls to local MCP server processes via stdio subprocess communication or local HTTP. The harness SHALL NOT contain imports, client libraries, or connection logic for any specific tool (e.g., no `import redis`, no GitHub API client). Tool-specific behavior is entirely encapsulated in the MCP server binaries declared in the configuration. When making HTTP calls to MCP servers, the harness SHALL apply per-server authentication as declared in the configuration.
 
 #### Scenario: Redis tool proxied generically
 - **WHEN** the LLM calls a `redis_get` tool provided by a local `@modelcontextprotocol/server-redis` MCP server
 - **THEN** the harness SHALL route the call to the MCP server subprocess and return the result without any Redis-specific code in the harness
+
+#### Scenario: Authenticated HTTP tool proxied generically
+- **WHEN** the LLM calls a GitHub tool configured on an HTTP server with bearer auth
+- **THEN** the harness SHALL route the call to the MCP server via HTTP with the appropriate auth header, without any GitHub-specific code in the harness
 
 ### Requirement: Tool execution timeout
 The harness SHALL enforce a configurable timeout on local tool execution. If a tool call exceeds the timeout, the harness SHALL return a `tool_result` indicating a timeout error rather than hanging indefinitely.
