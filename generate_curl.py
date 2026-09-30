@@ -1,33 +1,17 @@
 import os
-import subprocess
 import urllib.request
 import urllib.parse
 import json
 import base64
 
+from dotenv import load_dotenv
 
-def load_env(path=".env"):
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export "):]
-            key, _, value = line.partition("=")
-            value = value.strip("\"'")
-            os.environ[key] = value
-
-
-load_env()
+load_dotenv()
 
 client_id = os.environ["COGNITO_CLIENT_ID"]
 client_secret = os.environ["COGNITO_CLIENT_SECRET"]
 cognito_domain = os.environ["COGNITO_DOMAIN"]
-
-arn = "arn:aws:bedrock-agentcore:us-west-2:008977808353:runtime/CustomerSupport_CustomerSupport-0O47OSHdWX"
-url_encoded_arn = urllib.parse.quote(arn, safe="")
-agent_url = f"https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/{url_encoded_arn}/invocations"
+agent_url = os.environ["AGENT_URL"]
 payload = json.dumps({"prompt": "What is the return policy for electronics?"})
 
 print("Fetching Machine-to-Machine Token from Cognito...")

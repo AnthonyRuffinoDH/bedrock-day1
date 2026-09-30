@@ -1,108 +1,110 @@
-# AgentCore Project
+# CustomerSupport Agent
 
-This project was created with the [AgentCore CLI](https://github.com/aws/agentcore-cli).
+A customer support agent deployed on Amazon Bedrock AgentCore, fronted by a Slack bot using Socket Mode.
 
-## Project Structure
+## Architecture
 
 ```
-my-project/
-├── AGENTS.md               # AI coding assistant context
-├── agentcore/
-│   ├── agentcore.json      # Project config (agents, memories, credentials, gateways, evaluators)
-│   ├── aws-targets.json    # Deployment targets (account + region)
-│   ├── .env.local          # Secrets — API keys (gitignored)
-│   ├── .llm-context/       # TypeScript type definitions for AI assistants
-│   │   ├── agentcore.ts    # AgentCoreProjectSpec types
-│   │   └── aws-targets.ts  # Deployment target types
-│   └── cdk/                # CDK infrastructure (@aws/agentcore-cdk)
-├── app/                    # Agent application code
-└── evaluators/             # Custom evaluator code (if any)
+Slack (Socket Mode)
+  └─ bot.py (harness)
+       ├─ Gate evaluation   → POST /invocations { action: "evaluate_gate", prompt: ... }
+       ├─ Normal invocation → POST /invocations { prompt: ..., image_b64?: ... }
+       └─ Auth: Cognito M2M OAuth (client_credentials grant)
+
+AgentCore Runtime (CUSTOM_JWT auth)
+  └─ app/CustomerSupport/main.py
+       ├─ Tools: get_return_policy, get_product_info, MCP clients
+       ├─ Memory: AgentCore Memory (semantic + summarization)
+       └─ Model: Bedrock via AgentCore Runtime
 ```
+
+The harness (`bot.py`) runs locally or in Docker. The agent (`app/CustomerSupport/`) is deployed to AgentCore Runtime via `agentcore deploy`. See [CLAUDE.md](CLAUDE.md) for full architecture details.
+
+## Prerequisites
+
+- **make** (`sudo yum install -y make` on Amazon Linux, `sudo apt-get install -y make` on Debian/Ubuntu)
+- **Python 3.14+**
+- **Docker** (optional, for containerized harness)
+- **AWS CLI** configured with credentials (`aws configure` or ambient IAM role)
+- **AgentCore CLI** (`npm install -g @aws/agentcore-cli`)
+- **Slack app tokens** (see [Obtaining Slack Tokens](#obtaining-slack-tokens) below)
 
 ## Getting Started
 
-### Prerequisites
-
-- **Node.js** 20.x or later
-- **Python 3.10+** and **uv** for Python agents ([install uv](https://docs.astral.sh/uv/getting-started/installation/))
-- **AWS credentials** configured (`aws configure` or environment variables)
-- **Docker** (only for Container build agents)
-
-### Development
-
-Run your agent locally:
+### 1. Initialize configuration
 
 ```bash
-agentcore dev
+make init
 ```
 
-### Validate Invocation Input
+This copies `.env.example` to `.env`. Fill in the required values before continuing.
 
-Validate runtime invocation payloads before forwarding them to an agent framework. Keep user prompts typed as strings
-and pass only prompt text to the agent.
+### 2. Set up Cognito M2M credentials
 
-### Deployment
-
-Deploy to AWS:
+Add your `COGNITO_USER_POOL_ID` and `COGNITO_DOMAIN` to `.env`, then:
 
 ```bash
-agentcore deploy
+make setup-cognito
 ```
 
-## Commands
+This creates a Cognito app client and writes `COGNITO_CLIENT_ID` and `COGNITO_CLIENT_SECRET` into `.env`.
 
-| Command | Description |
-| --- | --- |
-| `agentcore create` | Create a new AgentCore project |
-| `agentcore add` | Add resources (agent, memory, credential, gateway, evaluator, policy) |
-| `agentcore remove` | Remove resources |
-| `agentcore dev` | Run agent locally with hot-reload |
-| `agentcore deploy` | Deploy to AWS via CDK |
-| `agentcore status` | Show deployment status |
-| `agentcore invoke` | Invoke agent (local or deployed) |
-| `agentcore logs` | View agent logs |
-| `agentcore traces` | View agent traces |
-| `agentcore eval` | Run evaluations |
-| `agentcore package` | Package agent artifacts |
-| `agentcore validate` | Validate configuration |
-| `agentcore pause` | Pause a deployed agent |
-| `agentcore resume` | Resume a paused agent |
-| `agentcore fetch` | Fetch remote resource definitions |
-| `agentcore import` | Import existing resources |
-| `agentcore update` | Check for CLI updates |
+### 3. Install harness dependencies
 
-## Configuration
+```bash
+make install
+```
 
-Edit the JSON files in `agentcore/` to configure your project. See `agentcore/.llm-context/` for type definitions and validation constraints.
+### 4. Deploy the agent
 
-The project uses a **flat resource model** — agents, memories, credentials, gateways, evaluators, and policies are top-level arrays in `agentcore.json`. Resources are independent; agents discover memories and credentials at runtime via environment variables or SDK calls.
+```bash
+make deploy
+```
 
-## Resources
+`AGENT_URL` is set automatically by `make setup`. If deploying separately, run `make setup-agent-url` to update it.
 
-| Resource | Purpose |
-| --- | --- |
-| Agent (runtime) | HTTP, MCP, or A2A agent deployed to AgentCore Runtime |
-| Memory | Persistent context storage with configurable strategies |
-| Credential | API key or OAuth credential providers |
-| Gateway | MCP gateway that routes tool calls to targets |
-| Gateway Target | Tool implementation (Lambda, MCP server, OpenAPI, Smithy, API Gateway) |
-| Evaluator | Custom LLM-as-a-Judge or code-based evaluation |
-| Online Eval Config | Continuous evaluation pipeline for deployed agents |
-| Policy | Cedar authorization policies for gateway tools |
+### 5. Configure Slack and run the harness
 
-### Agent Types
+Follow [docs/slack-setup.md](docs/slack-setup.md) to create your Slack app with the required scopes and tokens, then add `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` to `.env`.
 
-- **Template agents**: Created from framework templates (Strands, LangChain/LangGraph, GoogleADK, OpenAI Agents, Autogen)
-- **BYO agents**: Bring your own code with `agentcore add agent --type byo`
-- **Import agents**: Import existing Bedrock agents with `agentcore import`
+```bash
+make run-harness
+```
 
-### Build Types
+### Testing without Slack
 
-- **CodeZip**: Python source packaged as a zip and deployed directly to AgentCore Runtime
-- **Container**: Docker image built via CodeBuild (ARM64), pushed to ECR, and deployed to AgentCore Runtime
+```bash
+make curl-test
+```
 
-## Documentation
+This generates and prints a curl command using your M2M credentials.
 
-- [AgentCore CLI](https://github.com/aws/agentcore-cli)
-- [AgentCore CDK Constructs](https://github.com/aws/agentcore-l3-cdk-constructs)
-- [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/)
+## Docker
+
+Run the harness in a container instead of a local venv:
+
+```bash
+make up       # build and start in background
+make down     # stop
+```
+
+The container reads `.env` for configuration and mounts `~/.aws/` read-only for AWS credentials.
+
+## Slack App Setup
+
+See [docs/slack-setup.md](docs/slack-setup.md) for the complete guide with screenshots — creating the app, adding all required OAuth scopes, generating tokens, and enabling event subscriptions.
+
+## Makefile Targets
+
+| Target | Description |
+|---|---|
+| `make setup` | One-shot: init + auto-discover all AWS config (Cognito + agent URL) |
+| `make init` | Bootstrap `.env` from template |
+| `make setup-cognito` | Auto-discover Cognito pool, domain, and M2M client from AWS |
+| `make setup-agent-url` | Auto-discover deployed agent URL from AgentCore |
+| `make install` | Create venv and install harness dependencies |
+| `make deploy` | Deploy agent to AgentCore (`~3 min`) |
+| `make run-harness` | Start the Slack bot locally |
+| `make curl-test` | Generate a test curl command with M2M auth |
+| `make up` | Build and start harness via Docker Compose |
+| `make down` | Stop the Docker Compose harness |

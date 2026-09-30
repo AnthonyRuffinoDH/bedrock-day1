@@ -299,8 +299,9 @@ def handle_message(body, logger, say):
                 action = "IGNORE"
 
             if action == "IGNORE":
-                logger.info("[GATE DECISION] Result: IGNORE. Removing :thinking_face: silently.")
+                logger.info("[GATE DECISION] Result: IGNORE. Reacting with :thumbsup:")
                 unreact(channel_id, ts, "thinking_face")
+                react(channel_id, ts, "thumbsup")
                 return
 
             elif action == "INAPPROPRIATE":

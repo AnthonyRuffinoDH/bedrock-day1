@@ -1,8 +1,0 @@
-export COGNITO_CLIENT_ID=""
-export COGNITO_CLIENT_SECRET=""
-export COGNITO_DOMAIN=""
-
-export SLACK_APP_TOKEN=xapp-...
-export SLACK_BOT_TOKEN=xoxb-...
-
-export AGENT_URL=https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/.../invocations

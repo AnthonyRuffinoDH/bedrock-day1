@@ -1,0 +1,7 @@
+services:
+  harness:
+    build: .
+    env_file: .env
+    volumes:
+      - ~/.aws:/root/.aws:ro
+    restart: unless-stopped
